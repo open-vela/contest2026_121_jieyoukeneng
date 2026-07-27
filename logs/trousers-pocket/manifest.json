@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "team_id": "contest2026_121_jieyoukeneng",
+  "github_login": "trousers-pocket",
+  "generator": "claude-code-collector@1.2.0",
+  "updated_at": "2026-07-27T10:59:53.305Z",
+  "sessions": [
+    {
+      "session_id": "dc186fbf-7383-47e6-b372-5d7634a056e1",
+      "tool": "claude-code",
+      "started_at": "2026-07-27T09:35:44.320Z",
+      "last_event_at": "2026-07-27T10:59:53.301Z",
+      "event_count": 408,
+      "raw_event_count": 598,
+      "file_path": "logs/trousers-pocket/2026-07-27/claude-code__dc186fbf-7383-47e6-b372-5d7634a056e1.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "mimo-v2.5-pro"
+    }
+  ]
+}

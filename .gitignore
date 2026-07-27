@@ -1,0 +1,97 @@
+# 构建产物
+# 官方提交文档要求提交源码、README 和 logs。快应用 release 包也可能需要提交，
+# 所以这里不忽略 release .rpk 文件。
+# 固件镜像通常是体积较大的生成产物；如果组委会后续明确要求提交某个
+# image/bin 产物，可以用 git add -f 显式添加，或放到约定的 release 目录后
+# 再调整本文件。
+build/
+out/
+cmake_out/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.o
+*.a
+*.so
+*.elf
+*.hex
+*.map
+*.img
+*.uf2
+*.bin
+
+# 快应用本地依赖和开发期产物
+# debug 包只用于本地调试。生产模式的 release.rpk 不忽略，因为快应用指南要求
+# 提交 release.rpk。
+node_modules/
+quickapp/**/node_modules/
+quickapp/**/*.debug.rpk
+quickapp/**/*.debug.hap
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.pnpm-store/
+
+# 本地编辑器和操作系统文件
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 本地 AI 助手规则和草稿文件
+AGENTS.md
+AGENT.md
+agent.md
+CLAUDE.md
+claude.md
+.claude
+
+# 本地环境配置和密钥
+.env
+.env.*
+*.pem
+*.key
+
+# 本地缓存和临时文件
+.cache/
+.tmp/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.rej
+*.log
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# 硬件调试过程中的本地抓取和转储文件
+minicom.cap
+*.pcap
+*.pcapng
+core
+core.*
+*.coredump
+.gdb_history
+
+# Gemini-S1 / PTT / 音频测试过程中本地录制的媒体文件
+recordings/
+captures/
+*.raw
+*.pcm
+*.wav
+
+# 内部开发计划文档与硬件资料（暂不随仓库提交；
+# 后续需要随作品提交时，删除对应行或用 git add -f 显式添加）
+VELA_GEMINI_S1_R_V1.0_20260105 (1).pdf
+contest-plan.md
+docs/prd/
