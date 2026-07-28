@@ -3,7 +3,7 @@
   "team_id": "contest2026_121_jieyoukeneng",
   "github_login": "trousers-pocket",
   "generator": "claude-code-collector@1.2.0",
-  "updated_at": "2026-07-28T10:27:15.509Z",
+  "updated_at": "2026-07-28T14:54:50.024Z",
   "sessions": [
     {
       "session_id": "4b903d23-7786-487c-a02c-0b39279edb75",
@@ -62,24 +62,26 @@
     {
       "session_id": "0a985968-fe2d-4349-91b7-b9babd6c0e19",
       "tool": "claude-code",
-      "started_at": "2026-07-28T03:19:06.715Z",
-      "last_event_at": "2026-07-28T07:26:30.717Z",
-      "event_count": 550,
+      "started_at": "2026-07-28T07:38:10.273Z",
+      "last_event_at": "2026-07-28T14:54:50.016Z",
+      "event_count": 559,
       "file_path": "logs/trousers-pocket/2026-07-28/claude-code__0a985968-fe2d-4349-91b7-b9babd6c0e19.jsonl",
       "collection_mode": "cli",
       "health": "ok",
-      "model": "claude-opus-5"
+      "model": "claude-opus-5",
+      "raw_event_count": 853
     },
     {
       "session_id": "3438e03c-ba99-42ae-9c9b-884ecc3b4951",
       "tool": "claude-code",
-      "started_at": "2026-07-28T03:19:06.715Z",
-      "last_event_at": "2026-07-28T07:37:58.523Z",
-      "event_count": 557,
+      "started_at": "2026-07-28T07:38:10.462Z",
+      "last_event_at": "2026-07-28T13:14:03.128Z",
+      "event_count": 786,
       "file_path": "logs/trousers-pocket/2026-07-28/claude-code__3438e03c-ba99-42ae-9c9b-884ecc3b4951.jsonl",
       "collection_mode": "cli",
       "health": "ok",
-      "model": "claude-opus-5"
+      "model": "claude-opus-5",
+      "raw_event_count": 970
     },
     {
       "session_id": "7f352f3d-46ae-4d76-aac1-6f66c5c762f7",
@@ -92,6 +94,18 @@
       "health": "ok",
       "model": "claude-opus-5",
       "raw_event_count": 272
+    },
+    {
+      "session_id": "4cf20e51-9871-46cd-9a3d-c397b0b5be1d",
+      "tool": "claude-code",
+      "started_at": "2026-07-28T12:55:51.518Z",
+      "last_event_at": "2026-07-28T12:55:51.518Z",
+      "event_count": 579,
+      "raw_event_count": 656,
+      "file_path": "logs/trousers-pocket/2026-07-28/claude-code__4cf20e51-9871-46cd-9a3d-c397b0b5be1d.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5"
     }
   ]
 }

@@ -1,16 +1,40 @@
-类别,来源,数据集/说明,许可证,署名要求,是否已使用,备注
-alarm_beep,公开,"ESC-50 — siren / clock_alarm",CC BY-NC 3.0,"署名 Karol J. Piczak, ESC-50",待登记,非商业用途；使用前逐条核对 clip 许可证
-alarm_beep,公开,"FSD50K — Alarm / Smoke detector / Buzzer / Beep",逐 clip CC（含 CC0/CC-BY/CC-BY-NC）,逐 clip 署名,待登记,必须逐 clip 记录 Freesound ID 与许可证
-alarm_beep,自采,"真实烟感报警器实响（本队录制）",队伍自有,无,待登记,不含人声；原始音频不进 Git
-water_flow,公开,"ESC-50 — pouring_water / water_drops",CC BY-NC 3.0,"署名 Karol J. Piczak, ESC-50",待登记,
-water_flow,公开,"FSD50K — Water tap / faucet / Water",逐 clip CC,逐 clip 署名,待登记,
-water_flow,自采,"水龙头 / 淋浴 / 模拟漏水（本队录制）",队伍自有,无,待登记,
-impact,公开,"ESC-50 — glass_breaking / door_wood_knock",CC BY-NC 3.0,"署名 Karol J. Piczak, ESC-50",待登记,
-impact,公开,"FSD50K — Glass / Shatter / Thump / Bang",逐 clip CC,逐 clip 署名,待登记,
-impact,自采,"安全替代物撞击（摔纸箱、敲击木板）",队伍自有,无,待登记,不使用真实玻璃破碎，避免安全风险
-moan,自采,"呻吟 / 痛苦发声（本队成员拟音）",队伍自有,无,待登记,公开数据稀缺；已获录制者书面同意；只保留特征不保留原始录音
-scream,自采,"痛苦叫声 / 哭喊（本队成员拟音）",队伍自有,无,待登记,同上
-shout_help,自采,"连续呼救（普通话 + 演示方言）",队伍自有,无,待登记,同上
-name_call_help,自采,"姓名 / 亲属称呼 / 求救短语（平静与急促成对）",队伍自有,无,待登记,PRD-02 最小集：2 成员 × 2 称呼 × 3 短语 × 1 方言
-background,公开,"ESC-50 / FSD50K 背景与环境类",CC BY-NC 3.0 / 逐 clip CC,逐 clip 署名,待登记,负样本
-background,自采,"电视声 / 交谈 / 做饭 / 平静喊名",队伍自有,无,待登记,负样本；平静喊名是防误报关键负样本
+类别,来源类型,数据集,具体标签/类名,clip数,许可证,署名要求,核实日期,是否已使用,备注
+alarm_beep,公开,FSD50K,Alarm,1698,逐clip CC（CC0 768 / CC-BY 697 / CC-BY-NC 178 / 其他 55）,逐 clip 署名，明细见 reports/fsd50k_candidates.csv,2026-07-28,待下载音频,类别较宽泛，混有闹钟与警报器
+alarm_beep,公开,FSD50K,Chime,253,逐clip CC（CC0 76 / CC-BY 109 / CC-BY-NC 57）,同上,2026-07-28,待下载音频,
+alarm_beep,公开,FSD50K,Doorbell,142,逐clip CC（CC0 51 / CC-BY 70 / CC-BY-NC 15）,同上,2026-07-28,待下载音频,
+alarm_beep,公开,FSD50K,Siren,118,逐clip CC（CC0 61 / CC-BY 44 / CC-BY-NC 11）,同上,2026-07-28,待下载音频,
+alarm_beep,公开,ESC-50,clock_alarm + siren,80,CC BY-NC,"署名 Karol J. Piczak, ESC-50",2026-07-28,待下载音频,官方已按录音源分 5 fold，适合分组切分
+alarm_beep,自采,本队录制,真实烟感报警器测试键实响,目标 20-30,队伍自有,无,—,待录制,FSD50K 无 Smoke_detector 类，实响必须自录；不含人声
+water_flow,公开,FSD50K,Water,1896,逐clip CC（CC0 734 / CC-BY 913 / CC-BY-NC 198）,逐 clip 署名,2026-07-28,待下载音频,
+water_flow,公开,FSD50K,Water_tap_and_faucet,455,逐clip CC（CC0 236 / CC-BY 147 / CC-BY-NC 39）,同上,2026-07-28,待下载音频,
+water_flow,公开,FSD50K,Sink_(filling_or_washing),404,逐clip CC（CC0 231 / CC-BY 124 / CC-BY-NC 25）,同上,2026-07-28,待下载音频,
+water_flow,公开,FSD50K,Toilet_flush,274,逐clip CC（CC0 122 / CC-BY 103 / CC-BY-NC 23）,同上,2026-07-28,待下载音频,
+water_flow,公开,FSD50K,Bathtub_(filling_or_washing),202,逐clip CC（CC0 124 / CC-BY 52 / CC-BY-NC 15）,同上,2026-07-28,待下载音频,
+water_flow,公开,FSD50K,Boiling,102,逐clip CC（CC0 56 / CC-BY 39 / CC-BY-NC 4）,同上,2026-07-28,待下载音频,
+water_flow,公开,ESC-50,pouring_water + water_drops + toilet_flush,120,CC BY-NC,"署名 Karol J. Piczak, ESC-50",2026-07-28,待下载音频,
+water_flow,自采,本队录制,水龙头 / 淋浴 / 模拟漏水,目标 20+,队伍自有,无,—,待录制,覆盖不同距离与水量
+impact,公开,FSD50K,Glass,1227,逐clip CC（CC0 483 / CC-BY 588 / CC-BY-NC 133）,逐 clip 署名,2026-07-28,待下载音频,
+impact,公开,FSD50K,Shatter,505,逐clip CC（CC0 146 / CC-BY 308 / CC-BY-NC 46）,同上,2026-07-28,待下载音频,
+impact,公开,FSD50K,Thump_and_thud,461,逐clip CC（CC0 280 / CC-BY 128 / CC-BY-NC 38）,同上,2026-07-28,待下载音频,
+impact,公开,FSD50K,Knock,369,逐clip CC（CC0 223 / CC-BY 108 / CC-BY-NC 32）,同上,2026-07-28,待下载音频,
+impact,公开,ESC-50,glass_breaking + door_wood_knock,80,CC BY-NC,"署名 Karol J. Piczak, ESC-50",2026-07-28,待下载音频,
+impact,自采,本队录制,安全替代物撞击（摔纸箱、敲木板）,目标 20+,队伍自有,无,—,待录制,不使用真实玻璃破碎，避免安全风险
+scream,公开,FSD50K,Screaming,375,逐clip CC（CC0 154 / CC-BY 172 / CC-BY-NC 46）,逐 clip 署名,2026-07-28,待下载音频,痛苦叫声主力来源
+scream,公开,FSD50K,Crying_and_sobbing,150,逐clip CC（CC0 45 / CC-BY 70 / CC-BY-NC 26）,同上,2026-07-28,待下载音频,哭喊
+scream,公开,ESC-50,crying_baby,40,CC BY-NC,"署名 Karol J. Piczak, ESC-50",2026-07-28,待下载音频,婴儿哭声，与老人哭喊差异较大，仅作补充
+shout_help,公开,FSD50K,Shout,386,逐clip CC（CC0 152 / CC-BY 199 / CC-BY-NC 30）,逐 clip 署名,2026-07-28,待下载音频,内容多为英文/无意义喊叫
+shout_help,公开,FSD50K,Yell,198,逐clip CC（CC0 81 / CC-BY 101 / CC-BY-NC 14）,同上,2026-07-28,待下载音频,
+shout_help,自采,本队录制,中文连续呼救（普通话 + 演示方言）,目标 20+,队伍自有,无,—,待录制,已获录制者书面同意；只保留特征不保留原始录音
+moan,自采,本队录制,呻吟 / 痛苦发声,目标 每人30-50,队伍自有,无,—,待录制,"公开数据核实结果：FSD50K 200 类无 groan/moan/whimper；AudioSet 本体有 Groan / Wail,moan 但音频需从 YouTube 抓取，有 ToS 与版权风险，不采用"
+name_call_help,自采,本队录制,姓名 / 亲属称呼 / 求救短语（平静与急促成对）,PRD-02 最小集,队伍自有,无,—,待录制,2 成员 × 2 称呼 × 3 短语 × 1 方言；天然无公开数据
+background,公开,FSD50K,Speech,2142,逐clip CC（CC0 648 / CC-BY 1157 / CC-BY-NC 296）,逐 clip 署名,2026-07-28,待下载音频,普通说话负样本
+background,公开,FSD50K,Dishes_and_pots_and_pans,369,逐clip CC（CC0 162 / CC-BY 170 / CC-BY-NC 13）,同上,2026-07-28,待下载音频,做饭场景
+background,公开,FSD50K,Frying_(food),121,逐clip CC（CC0 55 / CC-BY 53 / CC-BY-NC 6）,同上,2026-07-28,待下载音频,
+background,公开,FSD50K,Conversation,116,逐clip CC（CC0 37 / CC-BY 55 / CC-BY-NC 18）,同上,2026-07-28,待下载音频,
+background,公开,ESC-50,家居与非语言人声共 16 类,640,CC BY-NC,"署名 Karol J. Piczak, ESC-50",2026-07-28,待下载音频,vacuum_cleaner/washing_machine/clock_tick/keyboard_typing 等
+background,自采,本队录制,电视声 / 交谈 / 做饭 / 平静喊名,目标 30 分钟+,队伍自有,无,—,待录制,平静喊名是防误报的关键负样本
+—,参考,AudioSet Ontology,"Groan / Wail,moan / Whimper / Gasp / Sigh",—,标签 CC BY 4.0（音频不随集分发）,—,2026-07-28,不采用,只发布标签与特征，音频须自行从 YouTube 获取，存在 ToS 与版权风险
+—,参考,UrbanSound8K,siren 等 10 类,8732,CC BY-NC 3.0,署名原作者,未逐条核实,不采用,城市场景为主，与家庭场景不匹配
+—,参考,Common Voice zh-CN,普通话朗读语音,—,CC0,无,未逐条核实,备选,授权最干净的中文负样本来源
+—,参考,MUSAN,noise / speech / music,—,CC BY 4.0,署名原作者,未逐条核实,备选,背景负样本补充
+—,参考,DEMAND,18 种真实环境噪声（含厨房/客厅）,—,CC BY-SA 3.0,署名并相同方式共享,未逐条核实,备选,家庭环境噪声补充
