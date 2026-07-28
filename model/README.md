@@ -9,10 +9,12 @@
 |---|---|
 | `velaguard_features.py` | 特征提取，**与端侧 `vg_feature.c` 逐步骤对齐** |
 | `synth_dataset.py` | 自举合成信号数据集（无版权风险、可复现） |
+| `fetch_public_datasets.py` | **公开数据集下载与映射**（ESC-50 / FSD50K → 我们的七类目录） |
 | `prepare_dataset.py` | 真实音频重采样 / 切片 / 目录整理 |
 | `train_models.py` | 训练、评估、int8 量化、导出端侧权重与指标报告 |
+| `dataset_sources.md` | **公开数据集调研**：类别映射、许可证、数量、缺口（已实际核对） |
 | `dataset_registry.csv` | **数据来源与许可证登记表**（PRD-07 要求随 model/ 提交） |
-| `reports/` | 自动生成的指标报告（`metrics.md` / `metrics.json`） |
+| `reports/` | 自动生成的指标报告与 FSD50K 候选清单 |
 
 ## 快速开始（自举模式，无需任何数据）
 
@@ -35,17 +37,36 @@ python3 train_models.py            # 约 30 秒
 
 ### 1. 收集六组数据
 
-| 组 | 来源建议 |
-|---|---|
-| 报警声 | ESC-50 `siren`/`clock_alarm`、FSD50K `Alarm/Smoke detector/Buzzer` + 自录真实烟感 |
-| 水流声 | ESC-50 `pouring_water`/`water_drops`、FSD50K `Water tap` + 自录水龙头/淋浴/漏水 |
-| 破碎撞击 | ESC-50 `glass_breaking`、FSD50K `Glass/Shatter/Thump` + 自录安全替代物 |
-| 呻吟/痛苦叫声 | **公开数据稀缺，以自采拟音为主**（须获录制者书面同意） |
-| 姓名/求救词 | 全部自录，平静与急促**成对**录制（PRD-02 最小集） |
-| 背景负样本 | ESC-50/FSD50K 背景类 + 自录电视声、交谈、做饭、**平静喊名** |
+**先看 [`dataset_sources.md`](dataset_sources.md)** —— 里面有已实际核对过的
+公开数据集调研结论（类别映射、clip 数量、逐条许可证分布）。
+
+一条命令拿到 ESC-50 并映射成训练目录：
+
+```bash
+python3 fetch_public_datasets.py --esc50 --dst ../datasets
+```
+
+FSD50K 先只下 7MB 元数据，看清许可证分布再决定要不要下 25GB 音频：
+
+```bash
+python3 fetch_public_datasets.py --fsd50k-meta
+# 输出 reports/fsd50k_candidates.csv：11963 条可用 clip，
+# 其中 CC0 + CC-BY 共 8743 条（授权最干净）
+python3 fetch_public_datasets.py --fsd50k-map /path/to/FSD50K --dst ../datasets
+```
+
+| 组 | 公开数据 | 必须自采 |
+|---|---|---|
+| 报警声 | FSD50K `Alarm` 等 1698 条 + ESC-50 80 条 | **真实烟感实响**（FSD50K 无 Smoke_detector 类） |
+| 水流声 | FSD50K 3333 条 + ESC-50 120 条 | 自家水龙头/淋浴（可选） |
+| 破碎撞击 | FSD50K 2562 条 + ESC-50 80 条 | 安全替代物（可选） |
+| 痛苦叫声/哭喊 | FSD50K `Screaming`+`Crying_and_sobbing` 525 条 | 可选 |
+| 连续呼救 | FSD50K `Shout`+`Yell` 584 条（英文为主） | **中文求救词** |
+| **呻吟** | **无公开数据** | **必采**，每人 30–50 条 |
+| 姓名/方言 | 天然无公开数据 | **必采**，PRD-02 最小集 |
+| 背景负样本 | FSD50K 2748 条 + ESC-50 640 条 | 自家电视/交谈/做饭/**平静喊名** |
 
 每用一条公开数据都要在 `dataset_registry.csv` 登记来源、许可证与署名要求。
-ESC-50 / UrbanSound8K 为 CC BY-NC 系；FSD50K 逐 clip 授权，必须逐条核对。
 
 ### 2. 预处理
 

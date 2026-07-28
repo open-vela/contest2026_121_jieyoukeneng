@@ -264,9 +264,11 @@ AI 在「样板代码 + 交叉一致性检查 + 文档同步」上贡献最大�
 | 文档 | 内容 |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | 数据流、源码地图、状态机、识别引擎、可靠性设计、两个 NuttX 坑 |
+| [`docs/manual-test.md`](docs/manual-test.md) | **手动测试手册**：模拟器 56 项 + 真机 64 项用例，含预期输出与故障排查 |
 | [`docs/acceptance.md`](docs/acceptance.md) | PRD-08 十项验收对照、实测性能与资源、待实机项、与 PRD 的偏差说明 |
 | [`docs/demo.md`](docs/demo.md) | ≤ 5 分钟演示脚本与兜底方案 |
-| [`model/README.md`](model/README.md) | 数据来源与许可证、训练与量化流程、模型预算 |
+| [`model/dataset_sources.md`](model/dataset_sources.md) | **公开数据集调研**：ESC-50 / FSD50K 类别映射、许可证与数量（已实际核对） |
+| [`model/README.md`](model/README.md) | 训练与量化流程、模型预算 |
 | [`agent_skill/README.md`](agent_skill/README.md) | Skill 部署、三级文案回退、隐私边界 |
 | [`prototype/console/README.md`](prototype/console/README.md) | 控制台接口、家属视角页面、协议与隐私校验 |
 | [`tests/README.md`](tests/README.md) | 主机侧回归覆盖内容与用法 |
