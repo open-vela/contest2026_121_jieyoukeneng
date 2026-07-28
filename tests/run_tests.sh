@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+#
+# 安聆 VelaGuard - 主机侧回归测试
+#
+#   cd tests && make test
+#
+# 覆盖内容：
+#   1. 端侧内置验收自检（PRD-08 可自动化场景，24 项断言）
+#   2. 端侧 C 特征实现 与 训练脚本 Python 特征实现 的逐维一致性
+#   3. 真实识别链路（wav -> 特征 -> int8 推理 -> 观测 -> 状态机 -> 事件）
+#   4. 事件日志断电重启不丢失 + 100 条环形覆盖
+#   5. 控制台协议闭环（上传 / 幂等补发 / 家属侧回写 / 隐私字段拒绝）
+#
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$HERE")"
+WORK="$HERE/.vgtest"
+BIN="$HERE/build/velaguard"
+
+PASS=0
+FAIL=0
+
+# 本地回环不走代理，避免开发机的 http_proxy 干扰测试
+export no_proxy="127.0.0.1,localhost"
+export NO_PROXY="$no_proxy"
+curlx() { curl --noproxy '*' "$@"; }
+
+ok()   { PASS=$((PASS+1)); echo "  ✓ $1"; }
+bad()  { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
+head2() { echo; echo "== $1 =="; }
+
+export VELAGUARD_DATA_DIR="$WORK/data"
+export VELAGUARD_SKILL_DIR="$ROOT/agent_skill/anling-home-safety"
+export VELAGUARD_CONSOLE_HOST=127.0.0.1
+export VELAGUARD_CONSOLE_PORT=18080
+export VELAGUARD_DEVICE_ID=velaguard_test
+
+rm -rf "$WORK/data"
+mkdir -p "$WORK/data" "$WORK/wav"
+
+# ---------------------------------------------------------------------------
+head2 "1. 端侧内置验收自检"
+# ---------------------------------------------------------------------------
+if "$BIN" selftest > "$WORK/selftest.log" 2>&1; then
+  ok "$(grep -o '通过 [0-9]* 项，失败 [0-9]* 项' "$WORK/selftest.log" | tail -1)"
+else
+  bad "内置自检失败，详见 $WORK/selftest.log"
+  tail -20 "$WORK/selftest.log"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "2. 特征实现一致性（端侧 C vs 训练脚本 Python）"
+# ---------------------------------------------------------------------------
+if python3 -c "import numpy" 2>/dev/null; then
+  if python3 "$HERE/check_feature_parity.py"; then
+    ok "特征逐维一致"
+  else
+    bad "特征不一致：电脑端训练指标在板上不成立"
+  fi
+else
+  echo "  - 跳过（缺少 numpy: pip3 install numpy）"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "3. 真实识别链路（wav -> 特征 -> int8 推理 -> 状态机）"
+# ---------------------------------------------------------------------------
+if python3 -c "import numpy" 2>/dev/null; then
+  python3 "$HERE/make_demo_wavs.py" > /dev/null
+
+  check_feed() {
+    local wav="$1" expect="$2" desc="$3"
+    local tag="${wav%.wav}"
+    rm -f "$VELAGUARD_DATA_DIR"/events.bin
+    "$BIN" feed "$WORK/wav/$wav" > "$WORK/feed_$tag.log" 2>&1
+    if "$BIN" log 20 2>/dev/null | grep -q "$expect"; then
+      ok "$desc"
+    else
+      bad "$desc（未产生预期事件，详见 $WORK/feed_$tag.log）"
+    fi
+  }
+
+  check_feed alarm_beep.wav "烟雾/燃气报警" "报警蜂鸣 wav 触发报警事件"
+  check_feed water_flow.wav "持续水流"     "持续水流 wav 触发水流事件"
+  check_feed impact.wav     "破碎或撞击"   "撞击 wav 触发撞击事件"
+
+  # 负样本：背景噪声与普通说话不得产生任何安全事件
+  rm -f "$VELAGUARD_DATA_DIR"/events.bin
+  "$BIN" feed "$WORK/wav/background.wav" > "$WORK/feed_bg.log" 2>&1
+  if [ "$("$BIN" log 50 2>/dev/null | grep -c '^[0-9]')" = "0" ]; then
+    ok "背景噪声负样本不误报"
+  else
+    bad "背景噪声产生了误报事件"
+    "$BIN" log 5
+  fi
+else
+  echo "  - 跳过（缺少 numpy）"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "4. 事件日志持久化与环形覆盖"
+# ---------------------------------------------------------------------------
+rm -f "$VELAGUARD_DATA_DIR"/events.bin
+"$BIN" sim alarm_beep --conf 0.95 --times 8 --interval 1000 > /dev/null 2>&1
+N1=$("$BIN" log 5 2>/dev/null | grep -c '^[0-9]')
+# 重新拉起进程 = 模拟断电重启
+N2=$("$BIN" log 5 2>/dev/null | grep -c '^[0-9]')
+if [ "$N1" -ge 1 ] && [ "$N1" = "$N2" ]; then
+  ok "重启后事件日志完整恢复（$N2 条）"
+else
+  bad "重启后日志丢失（重启前 $N1 条，重启后 $N2 条）"
+fi
+
+if [ -f "$VELAGUARD_DATA_DIR/events.bin" ]; then
+  ok "事件日志已落盘 $(du -h "$VELAGUARD_DATA_DIR/events.bin" | cut -f1)"
+else
+  bad "事件日志未落盘"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "5. 控制台协议闭环"
+# ---------------------------------------------------------------------------
+if command -v node > /dev/null 2>&1; then
+  rm -f "$WORK/console.db"
+  VELAGUARD_PORT=$VELAGUARD_CONSOLE_PORT VELAGUARD_DB="$WORK/console.db" \
+    node "$ROOT/prototype/console/server.js" > "$WORK/console.log" 2>&1 &
+  CONSOLE_PID=$!
+  sleep 1.2
+
+  if curlx -sf "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/health" > /dev/null; then
+    ok "控制台启动成功（零 npm 依赖）"
+  else
+    bad "控制台启动失败，详见 $WORK/console.log"
+  fi
+
+  # 5.1 设备上传
+  "$BIN" notify test > /dev/null 2>&1
+  if curlx -sf "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/events/evt_test" \
+       | grep -q '"ok":true'; then
+    ok "端侧事件成功上传到控制台"
+  else
+    bad "端侧事件上传失败"
+  fi
+
+  # 5.2 幂等：重复上传同一 eventId 只更新
+  "$BIN" notify test > /dev/null 2>&1
+  CNT=$(curlx -sf "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/events?limit=100" \
+        | grep -o '"eventId":"evt_test"' | wc -l)
+  if [ "$CNT" = "1" ]; then
+    ok "断网补发幂等：同一 eventId 不重复入库"
+  else
+    bad "幂等失败：evt_test 出现 $CNT 次"
+  fi
+
+  # 5.3 家属侧回写状态
+  if curlx -sf -X PATCH -H 'Content-Type: application/json' \
+       -d '{"localStatus":"handled"}' \
+       "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/events/evt_test" \
+       | grep -q '"localStatus":"handled"'; then
+    ok "家属侧可回写处理状态"
+  else
+    bad "家属侧状态回写失败"
+  fi
+
+  # 5.4 隐私红线：带原始音频/对话文本字段的负载必须被拒绝
+  CODE=$(curlx -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"eventId":"evt_priv","deviceId":"d","eventType":"impact","level":"warning","transcript":"家里的对话内容"}' \
+    "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/events")
+  if [ "$CODE" = "400" ]; then
+    ok "隐私红线：含对话文本的负载被拒绝"
+  else
+    bad "隐私红线失守：含 transcript 的负载返回 $CODE"
+  fi
+
+  # 5.5 协议校验：非法 eventType 必须被拒绝
+  CODE=$(curlx -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"eventId":"evt_bad","deviceId":"d","eventType":"door_open","level":"warning"}' \
+    "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/events")
+  if [ "$CODE" = "400" ]; then
+    ok "协议校验：非法 eventType 被拒绝"
+  else
+    bad "协议校验失效：非法 eventType 返回 $CODE"
+  fi
+
+  # 5.6 断网补发：控制台停掉后事件入队，恢复后自动送达
+  kill $CONSOLE_PID 2>/dev/null
+  wait $CONSOLE_PID 2>/dev/null
+  "$BIN" sim distress_voice --conf 0.95 --urgency 0.9 --times 3 \
+      --interval 800 > /dev/null 2>&1
+  PENDING=$("$BIN" flush 2>/dev/null | grep -o '待发送 [0-9]*' | head -1)
+  if echo "$PENDING" | grep -qv '待发送 0'; then
+    ok "断网期间通知进入待发送队列（$PENDING）"
+  else
+    bad "断网期间通知未入队"
+  fi
+
+  VELAGUARD_PORT=$VELAGUARD_CONSOLE_PORT VELAGUARD_DB="$WORK/console.db" \
+    node "$ROOT/prototype/console/server.js" >> "$WORK/console.log" 2>&1 &
+  CONSOLE_PID=$!
+  sleep 1.2
+  "$BIN" flush > /dev/null 2>&1
+  if "$BIN" flush 2>/dev/null | grep -q '待发送 0'; then
+    ok "网络恢复后待发送通知全部补发成功"
+  else
+    bad "网络恢复后补发失败"
+  fi
+
+  kill $CONSOLE_PID 2>/dev/null
+  wait $CONSOLE_PID 2>/dev/null
+else
+  echo "  - 跳过（未安装 node）"
+fi
+
+# ---------------------------------------------------------------------------
+head2 "6. 隐私自检：仓库内不得出现原始音频与明文凭证"
+# ---------------------------------------------------------------------------
+AUDIO=$(cd "$ROOT" && git ls-files | grep -Ei '\.(wav|mp3|flac|pcm|ogg|m4a)$' | wc -l)
+if [ "$AUDIO" = "0" ]; then
+  ok "Git 跟踪文件中无任何音频文件"
+else
+  bad "Git 中存在 $AUDIO 个音频文件"
+fi
+
+if [ -f "$ROOT/prototype/console/config.json" ]; then
+  bad "存在未忽略的真实配置文件 config.json"
+else
+  ok "仓库只提供 config.example.json，无真实凭证"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "======================================"
+echo "  回归结果：通过 $PASS 项，失败 $FAIL 项"
+echo "======================================"
+[ "$FAIL" = "0" ]

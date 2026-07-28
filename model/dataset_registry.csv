@@ -1,0 +1,16 @@
+类别,来源,数据集/说明,许可证,署名要求,是否已使用,备注
+alarm_beep,公开,"ESC-50 — siren / clock_alarm",CC BY-NC 3.0,"署名 Karol J. Piczak, ESC-50",待登记,非商业用途；使用前逐条核对 clip 许可证
+alarm_beep,公开,"FSD50K — Alarm / Smoke detector / Buzzer / Beep",逐 clip CC（含 CC0/CC-BY/CC-BY-NC）,逐 clip 署名,待登记,必须逐 clip 记录 Freesound ID 与许可证
+alarm_beep,自采,"真实烟感报警器实响（本队录制）",队伍自有,无,待登记,不含人声；原始音频不进 Git
+water_flow,公开,"ESC-50 — pouring_water / water_drops",CC BY-NC 3.0,"署名 Karol J. Piczak, ESC-50",待登记,
+water_flow,公开,"FSD50K — Water tap / faucet / Water",逐 clip CC,逐 clip 署名,待登记,
+water_flow,自采,"水龙头 / 淋浴 / 模拟漏水（本队录制）",队伍自有,无,待登记,
+impact,公开,"ESC-50 — glass_breaking / door_wood_knock",CC BY-NC 3.0,"署名 Karol J. Piczak, ESC-50",待登记,
+impact,公开,"FSD50K — Glass / Shatter / Thump / Bang",逐 clip CC,逐 clip 署名,待登记,
+impact,自采,"安全替代物撞击（摔纸箱、敲击木板）",队伍自有,无,待登记,不使用真实玻璃破碎，避免安全风险
+moan,自采,"呻吟 / 痛苦发声（本队成员拟音）",队伍自有,无,待登记,公开数据稀缺；已获录制者书面同意；只保留特征不保留原始录音
+scream,自采,"痛苦叫声 / 哭喊（本队成员拟音）",队伍自有,无,待登记,同上
+shout_help,自采,"连续呼救（普通话 + 演示方言）",队伍自有,无,待登记,同上
+name_call_help,自采,"姓名 / 亲属称呼 / 求救短语（平静与急促成对）",队伍自有,无,待登记,PRD-02 最小集：2 成员 × 2 称呼 × 3 短语 × 1 方言
+background,公开,"ESC-50 / FSD50K 背景与环境类",CC BY-NC 3.0 / 逐 clip CC,逐 clip 署名,待登记,负样本
+background,自采,"电视声 / 交谈 / 做饭 / 平静喊名",队伍自有,无,待登记,负样本；平静喊名是防误报关键负样本

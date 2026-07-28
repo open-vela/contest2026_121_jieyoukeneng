@@ -3,19 +3,95 @@
   "team_id": "contest2026_121_jieyoukeneng",
   "github_login": "trousers-pocket",
   "generator": "claude-code-collector@1.2.0",
-  "updated_at": "2026-07-27T10:59:53.305Z",
+  "updated_at": "2026-07-28T10:27:15.509Z",
   "sessions": [
+    {
+      "session_id": "4b903d23-7786-487c-a02c-0b39279edb75",
+      "tool": "claude-code",
+      "started_at": "2026-07-25T18:44:56.600Z",
+      "last_event_at": "2026-07-26T07:22:03.311Z",
+      "event_count": 119,
+      "file_path": "logs/trousers-pocket/2026-07-26/claude-code__4b903d23-7786-487c-a02c-0b39279edb75.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-fable-5"
+    },
+    {
+      "session_id": "6075a3c9-3e0c-4d1a-a64d-abf6dcd075fb",
+      "tool": "claude-code",
+      "started_at": "2026-07-26T19:06:40.079Z",
+      "last_event_at": "2026-07-26T19:08:10.661Z",
+      "event_count": 30,
+      "file_path": "logs/trousers-pocket/2026-07-27/claude-code__6075a3c9-3e0c-4d1a-a64d-abf6dcd075fb.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "mimo-v2.5-pro"
+    },
     {
       "session_id": "dc186fbf-7383-47e6-b372-5d7634a056e1",
       "tool": "claude-code",
-      "started_at": "2026-07-27T09:35:44.320Z",
-      "last_event_at": "2026-07-27T10:59:53.301Z",
+      "started_at": "2026-07-26T19:47:09.602Z",
+      "last_event_at": "2026-07-27T10:59:53.129Z",
       "event_count": 408,
-      "raw_event_count": 598,
       "file_path": "logs/trousers-pocket/2026-07-27/claude-code__dc186fbf-7383-47e6-b372-5d7634a056e1.jsonl",
       "collection_mode": "cli",
       "health": "ok",
       "model": "mimo-v2.5-pro"
+    },
+    {
+      "session_id": "3f4c140c-30b0-4213-b628-72ec56629644",
+      "tool": "claude-code",
+      "started_at": "2026-07-27T16:38:54.478Z",
+      "last_event_at": "2026-07-27T16:57:10.010Z",
+      "event_count": 8,
+      "file_path": "logs/trousers-pocket/2026-07-28/claude-code__3f4c140c-30b0-4213-b628-72ec56629644.jsonl",
+      "collection_mode": "cli",
+      "health": "ok"
+    },
+    {
+      "session_id": "f3552929-4c68-4281-8fe6-782f8859f4dd",
+      "tool": "claude-code",
+      "started_at": "2026-07-27T16:57:30.496Z",
+      "last_event_at": "2026-07-28T03:18:35.906Z",
+      "event_count": 17,
+      "file_path": "logs/trousers-pocket/2026-07-28/claude-code__f3552929-4c68-4281-8fe6-782f8859f4dd.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "<synthetic>"
+    },
+    {
+      "session_id": "0a985968-fe2d-4349-91b7-b9babd6c0e19",
+      "tool": "claude-code",
+      "started_at": "2026-07-28T03:19:06.715Z",
+      "last_event_at": "2026-07-28T07:26:30.717Z",
+      "event_count": 550,
+      "file_path": "logs/trousers-pocket/2026-07-28/claude-code__0a985968-fe2d-4349-91b7-b9babd6c0e19.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5"
+    },
+    {
+      "session_id": "3438e03c-ba99-42ae-9c9b-884ecc3b4951",
+      "tool": "claude-code",
+      "started_at": "2026-07-28T03:19:06.715Z",
+      "last_event_at": "2026-07-28T07:37:58.523Z",
+      "event_count": 557,
+      "file_path": "logs/trousers-pocket/2026-07-28/claude-code__3438e03c-ba99-42ae-9c9b-884ecc3b4951.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5"
+    },
+    {
+      "session_id": "7f352f3d-46ae-4d76-aac1-6f66c5c762f7",
+      "tool": "claude-code",
+      "started_at": "2026-07-28T07:38:10.900Z",
+      "last_event_at": "2026-07-28T10:27:15.507Z",
+      "event_count": 189,
+      "file_path": "logs/trousers-pocket/2026-07-28/claude-code__7f352f3d-46ae-4d76-aac1-6f66c5c762f7.jsonl",
+      "collection_mode": "cli",
+      "health": "ok",
+      "model": "claude-opus-5",
+      "raw_event_count": 272
     }
   ]
 }
