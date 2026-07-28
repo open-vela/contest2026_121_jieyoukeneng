@@ -1,0 +1,14 @@
+{
+  "name": "velaguard-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "安聆 VelaGuard 通知与演示控制台（零 npm 依赖，仅用 Node 内置模块）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "reset": "node -e \"require('fs').rmSync('events.db',{force:true});console.log('已清空事件库')\""
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

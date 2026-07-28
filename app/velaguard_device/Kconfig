@@ -1,0 +1,65 @@
+#
+# 安聆 VelaGuard —— 无摄像头家庭异常声景 AI Agent
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config LVX_USE_DEMO_CONTEST2026_121_VELAGUARD
+	bool "VelaGuard - 安聆家庭异常声景 AI Agent (contest2026 team 121)"
+	default n
+	---help---
+		安聆 VelaGuard：面向独居长辈家庭看护的端侧异常声景识别与告警系统。
+		本地识别烟雾报警、持续水流、破碎撞击、呻吟呼救与个性化姓名/求救词，
+		经三级风险状态机产生事件，先本地提醒，无人确认后升级为家属侧远程通知。
+		原始音频不出设备。
+
+if LVX_USE_DEMO_CONTEST2026_121_VELAGUARD
+
+config VELAGUARD_PRIORITY
+	int "守护任务优先级"
+	default 100
+
+config VELAGUARD_STACKSIZE
+	int "守护任务栈大小"
+	default 32768
+
+config VELAGUARD_DATA_DIR
+	string "数据目录（事件日志 / 模板 / 配置）"
+	default "/data/velaguard"
+	---help---
+		事件日志、个性化模板与运行配置的存放位置。
+		真实配置 config.json 不进 Git，仓库只提供 config.example.json。
+
+config VELAGUARD_PCM_DEVICE
+	string "麦克风 PCM 设备"
+	default "/dev/audio/pcm0c"
+	---help---
+		实机线使用的板载麦克风采集设备；模拟器线可改用 wav 音频源。
+
+config VELAGUARD_LED_DEVICE
+	string "RGB LED 设备"
+	default "/dev/userleds"
+	---help---
+		板载 WS2812 RGB LED。设备不存在时自动降级为控制台指示。
+
+config VELAGUARD_BUTTON_DEVICE
+	string "按键设备"
+	default "/dev/buttons"
+	---help---
+		板载 LRADC 按键（原理图 SW2—SW6）。设备不存在时使用串口命令
+		velaguard key <动作> 完成同样的操作。
+
+config VELAGUARD_TONE_DIR
+	string "分级提示音资源目录"
+	default "/data/velaguard/tones"
+
+config VELAGUARD_UI_LVGL
+	bool "启用 LVGL LCD 界面"
+	default n
+	depends on GRAPHICS_LVGL && LV_USE_NUTTX
+	---help---
+		在板载 LCD 上显示监测首页 / 事件确认页 / 历史记录页。
+		关闭时仍可通过 velaguard ui 命令查看完全相同的页面内容。
+
+endif

@@ -1,0 +1,45 @@
+{
+  "_README": [
+    "安聆 VelaGuard 运行配置模板。",
+    "部署方法：拷贝为设备上的 /data/velaguard/config.json 后按实际环境修改。",
+    "真实配置含 Wi-Fi 密码与控制台/webhook 地址，绝不提交到 Git（.gitignore 已排除）。",
+    "所有字段都可省略，省略时使用固件内置默认值。"
+  ],
+
+  "deviceId": "velaguard_demo_001",
+  "dataDir": "/data/velaguard",
+
+  "_console": "通知主通道：局域网演示控制台（PRD-06）。演示时填手机热点下笔记本的 IP。",
+  "consoleHost": "192.168.43.1",
+  "consolePort": 8080,
+  "consolePath": "/events",
+
+  "_webhook": "可选扩展通道，失败不影响主通道。真实地址不要写进仓库。",
+  "webhookEnabled": false,
+  "webhookUrl": "http://192.168.43.1:9000/hook",
+
+  "_demoMode": "true 使用缩短阈值（演示用）；正式部署置 false 并按下方正式阈值配置。",
+  "demoMode": true,
+
+  "_confidence": "各通道置信度门限，提高可减少误报、降低召回。",
+  "confAlarmBeep": 0.80,
+  "confWaterFlow": 0.70,
+  "confImpact": 0.80,
+  "confDistress": 0.70,
+  "confNameCall": 0.70,
+
+  "_thresholds": "PRD-03 状态机阈值（秒）。下面是正式部署档，演示档见 demoMode。",
+  "alarmHoldSec": 5,
+  "waterNoticeSec": 30,
+  "waterWarningSec": 120,
+  "warningCountdownSec": 180,
+  "impactRepeatWindowSec": 60,
+  "distressRepeatWindowSec": 60,
+  "snoozeMinutes": 10,
+  "snoozeMaxCount": 2,
+  "eventIdleTimeoutSec": 15,
+
+  "_upload": "上传重试间隔（秒，线性退避封顶 6 倍）与待发送队列上限。",
+  "uploadRetrySec": 10,
+  "uploadQueueMax": 32
+}

@@ -95,3 +95,33 @@ captures/
 VELA_GEMINI_S1_R_V1.0_20260105 (1).pdf
 contest-plan.md
 docs/prd/
+
+# ---------------------------------------------------------------------------
+# 安聆 VelaGuard 相关
+# ---------------------------------------------------------------------------
+
+# 主机侧回归的编译产物与临时工作区
+tests/build/
+tests/.vgtest/
+
+# 控制台运行期数据库（含事件记录，属于用户数据，不进仓）
+prototype/console/events.db
+prototype/console/*.db
+
+# 真实运行配置：含 Wi-Fi 密码 / 控制台地址 / webhook 地址，绝不进仓。
+# 仓库只提供 config.example.json 模板。
+prototype/console/config.json
+config/velaguard.config.json
+**/velaguard/config.json
+
+# 数据集：原始音频与切片产物只存本地 / TF 卡（隐私红线 1）
+datasets/
+model/raw_audio/
+model/synth_samples/
+model/**/*.npy
+
+# 端侧运行期数据（事件日志、个性化模板、待发送队列）
+*.bin.bak
+events.bin
+templates.bin
+pending.jsonl

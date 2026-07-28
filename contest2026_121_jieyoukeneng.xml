@@ -9,6 +9,9 @@
   <include name="openvela.xml"/>
 
   <project path="contest2026_121_jieyoukeneng" name="contest2026_121_jieyoukeneng">
+    <!-- 安聆 VelaGuard 端侧应用（作品主体） -->
+    <linkfile src="app/velaguard_device" dest="packages/demos/contest2026_121_velaguard"/>
+    <!-- 组委会提供的示例骨架，保留以便对照 -->
     <linkfile src="app/hello_app" dest="packages/demos/contest2026_121_hello_app"/>
     <linkfile src="quickapp/hello_quickapp" dest="packages/apps/contest2026_121_hello_quickapp"/>
     <linkfile src="board/contest_board" dest="vendor/openvela/boards/contest2026_121_board"/>

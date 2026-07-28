@@ -1,0 +1,237 @@
+{
+  "trained_on": "synthetic-bootstrap",
+  "version": "20260728",
+  "windows": 840,
+  "feature_dim": 40,
+  "weight_bytes": 2592,
+  "results": {
+    "env": {
+      "float": {
+        "accuracy": 1.0,
+        "macro_f1": 1.0,
+        "per_class": {
+          "other": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 144
+          },
+          "alarm_beep": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 45
+          },
+          "water_flow": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 39
+          },
+          "impact": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 24
+          }
+        },
+        "confusion": [
+          [
+            144,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            45,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            39,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            24
+          ]
+        ]
+      },
+      "int8": {
+        "accuracy": 1.0,
+        "macro_f1": 1.0,
+        "per_class": {
+          "other": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 144
+          },
+          "alarm_beep": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 45
+          },
+          "water_flow": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 39
+          },
+          "impact": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 24
+          }
+        },
+        "confusion": [
+          [
+            144,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            45,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            39,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            24
+          ]
+        ]
+      }
+    },
+    "voice": {
+      "float": {
+        "accuracy": 1.0,
+        "macro_f1": 1.0,
+        "per_class": {
+          "none": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 141
+          },
+          "moan": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 39
+          },
+          "scream": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 36
+          },
+          "shout_help": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 36
+          }
+        },
+        "confusion": [
+          [
+            141,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            39,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            36,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            36
+          ]
+        ]
+      },
+      "int8": {
+        "accuracy": 1.0,
+        "macro_f1": 1.0,
+        "per_class": {
+          "none": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 141
+          },
+          "moan": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 39
+          },
+          "scream": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 36
+          },
+          "shout_help": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 36
+          }
+        },
+        "confusion": [
+          [
+            141,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            39,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            36,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            36
+          ]
+        ]
+      }
+    }
+  }
+}

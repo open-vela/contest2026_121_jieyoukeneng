@@ -1,0 +1,26 @@
+{
+  "_comment": "安聆 VelaGuard 通知建议规则表。端侧 vg_agent.c 直接读取本文件，作为 LLM 不可用时的第二级回退（第三级是端侧内置模板）。键名格式：<eventType> 或 <eventType>.<level>，后者优先。",
+
+  "alarm_beep": "疑似烟雾或燃气报警，建议立即电话确认，必要时联系邻居上门查看",
+  "alarm_beep.notice": "检测到疑似报警器提示音，暂时只做记录，无需处理",
+  "alarm_beep.warning": "疑似报警器持续发声，建议电话确认家中情况",
+  "alarm_beep.emergency": "疑似烟雾或燃气报警且无人响应，建议立即电话确认，联系不上请马上联系邻居或物业上门",
+
+  "water_flow": "疑似忘关水龙头或漏水，建议电话提醒关闭水阀",
+  "water_flow.notice": "检测到持续水流，暂不需要处理，设备会继续观察",
+  "water_flow.warning": "水流已持续较长时间，建议电话提醒关闭水阀",
+  "water_flow.emergency": "水流长时间未停且无人响应，建议立即电话确认，必要时上门检查是否漏水",
+
+  "impact": "疑似跌倒或物品破碎，建议立即电话确认老人是否受伤",
+  "impact.warning": "检测到一次撞击或破碎声，建议电话确认家中是否安全",
+  "impact.emergency": "检测到撞击或破碎声且无人响应，怀疑跌倒，建议立即电话确认并准备上门",
+
+  "distress_voice": "检测到疑似求助呼喊，建议立即电话确认，无人接听请尽快上门",
+  "distress_voice.warning": "检测到疑似呻吟或不适发声，建议电话确认是否需要帮助",
+  "distress_voice.emergency": "检测到持续呻吟或呼救且无人响应，建议立即电话确认，无人接听请尽快上门",
+
+  "name_call_help": "检测到求助呼喊，建议电话确认",
+  "name_call_help.notice": "有人在家中呼喊称呼，语气平静，暂不需要处理",
+  "name_call_help.warning": "检测到呼喊求助，建议电话确认是否需要帮助",
+  "name_call_help.emergency": "检测到急促重复的求救呼喊且无人响应，建议立即电话联系，无人接听请尽快上门"
+}
