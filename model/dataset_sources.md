@@ -198,17 +198,25 @@ python3 train_models.py --data-dir ../datasets
 每类 40–700 条。**先把真实数据链路跑通**，指标不会好看（`scream` 只有
 crying_baby，`moan` / `shout_help` 完全没有），但足以验证流程。
 
-### 第二步：加 FSD50K（1–2 天，按需下载）
+### 第二步：加 FSD50K（✅ 已于 2026-08-02 完成，走 HF 镜像逐 clip 下载）
 
 ```bash
-python3 fetch_public_datasets.py --fsd50k-meta --dst ../datasets   # 先下 7MB 元数据
-# 看过许可证分布、决定要哪些 clip 后再下音频
-python3 fetch_public_datasets.py --fsd50k-map /path/to/FSD50K --dst ../datasets
-python3 train_models.py --data-dir ../datasets --epochs 1500
+python3 fetch_public_datasets.py --fsd50k-meta                    # 先下 7MB 元数据
+python3 fetch_public_datasets.py --fsd50k-fetch --dst ../datasets # 按清单逐 clip 下载
+python3 train_models.py --data-dir ../datasets --epochs 3000 --features v2 --final
 ```
 
-这一步之后，除 `moan` 外六类都有真实数据，**PRD-07 的宏平均 F1 ≥ 0.80
-和各类召回 ≥ 0.80 应该在这一步达成**。
+**实际执行记录**：没有下载 Zenodo 的 25GB 分卷压缩包（分卷必须下齐才能解压、
+峰值占盘翻倍、单连接实测约 16 小时）。改走 HuggingFace 镜像
+（`Fhrozen/FSD50k`，clip 逐个平铺存放），按 `fsd50k_candidates.csv` 里筛好的
+CC0+CC-BY 清单精确取用：8551 条候选（10332 行按 clip 去重、剔除 192 条跨目标
+类冲突后），16 并发 30.7 分钟全部下完、0 失败，250 条短于 0.5 秒丢弃，
+最终入库 8267 条 / 约 4.6GB（已转 16kHz 单声道）。
+
+这一步之后除 `moan` 外六类都有 FSD50K 真实数据。窗口级宏 F1 未直接达
+0.80（40 维 MFCC 统计特征对瞬态类是表征瓶颈），最终通过「v2 特征（+13 维
+瞬态/谱形描述子）+ voice 三类合并 + 事件级口径」达标，见
+`reports/metrics.md` 与 `docs/acceptance.md`。
 
 ### 第三步：自采补齐（1–2 天）
 
@@ -224,7 +232,38 @@ python3 train_models.py --data-dir ../datasets --epochs 1500
 
 自采完成后重跑第二步的训练命令即可。
 
-## 七、合规检查清单
+## 七、第二批候选数据集（2026-07-31 核实）
+
+> 背景：本机网络**境外直连全部不通**（Zenodo / GitHub / Kaggle / Freesound 均不可达，
+> 配置的两个代理 127.0.0.1:7890 与 192.168.2.68:7890 均无响应），
+> 但 **hf-mirror.com（HuggingFace 镜像）、ModelScope、Gitee、OpenI 可直连**。
+> 因此本批候选全部选择**在 hf-mirror 上有镜像、可直接下载**的数据集，
+> 许可证与内容已逐一抓取各仓库 README 核对。
+>
+> 下载方式统一为（注意先清掉失效代理变量）：
+> ```bash
+> unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+> HF_ENDPOINT=https://hf-mirror.com huggingface-cli download --repo-type dataset <repo_id> --local-dir <dst>
+> ```
+
+| 数据集 | HF 镜像仓库 | 补哪个缺口 | 许可证（已核） | 备注 |
+|---|---|---|---|---|
+| **Nonspeech7k** ✅已下载 | `W4ng1204/Nonspeech7k`（parquet，train+test） | `scream` 主力、`background`（咳嗽/呼吸/笑/打喷嚏/哈欠） | 原始集 CC BY 4.0（Zenodo 6967442，镜像未标，登记时按原始集写） | **实点 7014 条**：screaming 663、crying 1996、breath 1850、laugh 1273、cough 702、sneeze 266、yawn 264 |
+| **VIVAE** ✅已下载 | `vtsouval/vivae` | **`moan` 首个可用公开源**、`scream` | CC BY-NC 4.0（镜像与 Zenodo 4066235 一致） | **实点 1565 条**（full_set 1085 + core_set 480）：pain 265、fear 256、anger 254、achievement 241、pleasure 282、surprise 267；4 档强度正好配合状态机分级 |
+| **ASVP-ESD** ✅已下载 | ~~`EdwardLin2023/ASVP_ESD`~~ 音频在 Google Drive 不可达；**实际走 Kaggle 匿名直连**（`dejolilandry/asvpesdspeech-nonspeech-emotional-utterances`，1.6GB zip） | `moan` 补充、`scream` 补充 | CC BY 4.0 | **实点 13,964 条 wav**（完整更新版，远超 HF README 的 speech 小表）：pain/groan **834**、fearful/scream/panic **1180**、sad/cry 2694、neutral 1598、happy/laugh 1868、breath 172 等；文件名第 3 段为情绪码 |
+| **VocalSound** ✅已下载 | `MahiA/VocalSound` | `background` 人声负样本 | 原始集 CC BY-SA 4.0（Gong et al.，MIT 标注是镜像自标，登记按原始集） | **实点 21,024 条**：笑、叹气、咳嗽、清嗓、喷嚏、吸鼻六类均衡；**叹气/咳嗽是防 moan 误报的关键负样本** |
+| **AudioSet（HF 托管音频版）** ✅已下载 | `agkphysics/AudioSet`（balanced 配置，38 个 parquet 分片已逐一比对字节数） | **烟感报警实响**、`shout_help`、`moan` | 仓库标 CC BY 4.0；音频源自 YouTube，**合规风险自评后再用，逐条登记** | **实点 18,683 条 / 527 类**（flac 于 parquet 内）：Smoke detector 54、Fire alarm 55、Siren 172、Shout 49、Yell 54、Groan 47、Wail moan 40、Whimper 41、Screaming 45、Glass 57、Water 218 等；每类约 40–60 条，作补充不作主力 |
+| **CochlScene**（可选） | `yotarokubo/CochlScene` | `background` 真实场景底噪 | CC BY-SA 3.0（Zenodo 7080122） | 76k 条 13 种场景（含厨房/居住区），全量 34GB，按需抽取 |
+
+不推荐：`lrauch/desed` —— 名字叫 DESED，实际内容是 IDMT-FL（Zenodo 7551584），
+且许可证为 **CC BY-NC-ND 4.0**（禁止演绎），训练用途边界不清，跳过。
+
+搜索通道现状（供后续复用）：内置 WebSearch 偶发 429；open-websearch MCP 里
+**只有 sogou 可用**（baidu 被 302 反爬拦截，bing 请求模式返回无关缓存页，
+duckduckgo/brave/startpage/exa 因境外不通全部失效，playwright 模式缺依赖）。
+查数据集优先用 `https://hf-mirror.com/api/datasets?search=<关键词>`。
+
+## 八、合规检查清单
 
 提交前逐条确认：
 

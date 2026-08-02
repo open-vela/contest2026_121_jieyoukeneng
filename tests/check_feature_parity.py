@@ -66,7 +66,7 @@ def main():
 
         for line, win in zip(out, windows):
             c_feat = np.array([float(x) for x in line.split()[2:]])
-            py_feat = vf.extract(win)
+            py_feat = vf.extract_v2(win)
             diff = float(np.max(np.abs(c_feat - py_feat)))
             worst = max(worst, diff)
             checked += 1
@@ -76,7 +76,7 @@ def main():
                 print(f"   C ={c_feat[bad]:.6f}  PY={py_feat[bad]:.6f}")
                 return 1
 
-    print(f"✓ 特征一致性通过：{checked} 个窗口 × {vf.FEATURE_DIM} 维，"
+    print(f"✓ 特征一致性通过：{checked} 个窗口 × {vf.FEATURE_DIM_V2} 维，"
           f"最大绝对误差 {worst:.2e}（阈值 {TOL}）")
     return 0
 

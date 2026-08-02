@@ -22,12 +22,18 @@ extern "C"
 /* 环境声景分类：other / alarm_beep / water_flow / impact */
 
 #define VG_ENV_CLASSES   4
-#define VG_ENV_HIDDEN    24
+#define VG_ENV_HIDDEN    48
 
-/* 人声异常检测：none / moan / scream / shout_help */
+/* 人声异常检测：none / distress
+ *
+ * 2026-08 定稿：moan/scream/shout_help 合并为 distress。三类在状态机里的
+ * 处置本就同路（VG_EVT_DISTRESS_VOICE：本地询问 -> 重复升级），而三类
+ * 两两互混恰是错误主体（四类结构事件级宏 F1 仅 0.54，合并后 0.89）。
+ * 急促程度改由检测器用能量/谱质心估计，产品行为不变。
+ */
 
-#define VG_VOICE_CLASSES 4
-#define VG_VOICE_HIDDEN  16
+#define VG_VOICE_CLASSES 2
+#define VG_VOICE_HIDDEN  32
 
 /* 由训练脚本生成的权重（int8 量化 + per-tensor scale） */
 

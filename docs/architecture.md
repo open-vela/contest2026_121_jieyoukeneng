@@ -5,37 +5,71 @@
 
 ## 一、整体数据流
 
-```text
-                   ┌──────────────── 端侧（完全离线可用）─────────────────┐
-板载麦克风 / wav ──►│ vg_capture      音频源抽象（MIC / WAV / 无源）       │
-                   │      │ 16kHz 单声道，1 秒窗口，50% 重叠             │
-                   │      ▼                                              │
-                   │ vg_feature      预加重→Hamming→FFT→Mel→MFCC→40 维    │
-                   │      │                                              │
-                   │      ├─► vg_classifier  环境声景 int8 MLP  ─┐        │
-                   │      ├─► vg_classifier  人声异常 int8 MLP  ─┤        │
-                   │      └─► vg_enroll      个性化模板匹配     ─┤        │
-                   │                                            ▼        │
-                   │              SoundObservation / DistressObservation  │
-                   │                            │                        │
-                   │                            ▼                        │
-                   │ vg_event_sm     三级风险状态机 + 五类规则 + 并发仲裁  │
-                   │        │            + snooze + 夜间/时钟降级         │
-                   │        ├──────────────► vg_event_log  100 条环形日志 │
-                   │        ├──────────────► vg_ui         LCD 三页面     │
-                   │        ├──────────────► vg_indicator  提示音 + LED   │
-                   │        │                vg_input      按键/串口      │
-                   │        ▼（仅"无人确认→紧急"时）                       │
-                   │ vg_notifier ──► vg_agent（Skill 文案）               │
-                   │        │                                            │
-                   │ vg_uploader     幂等队列 + 断网补发                   │
-                   └────────┼───────────────────────────────────────────┘
-                            │ HTTP POST 结构化摘要（无音频、无对话文本）
-                            ▼
-                 prototype/console  Node 零依赖控制台 + SQLite
-                            │ SSE
-                            ▼
-                 家属手机浏览器（局域网，零 App、零账号、零公网）
+> 完整 PlantUML 源码：[dataflow.puml](diagrams/dataflow.puml)
+
+```plantuml
+@startuml 整体数据流
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+
+title 安聆 VelaGuard 整体数据流
+
+package "端侧（完全离线可用）" {
+    [板载麦克风 / wav] as MIC
+
+    component "vg_capture\n音频源抽象（MIC / WAV / 无源）" as CAPTURE {
+        note right: 16kHz 单声道\n1 秒窗口，50% 重叠
+    }
+
+    component "vg_feature\n预加重→Hamming→FFT→Mel→MFCC→40 维" as FEATURE
+
+    component "vg_classifier\n环境声景 int8 MLP" as CLS_ENV
+    component "vg_classifier\n人声异常 int8 MLP" as CLS_VOICE
+    component "vg_enroll\n个性化模板匹配" as ENROLL
+
+    database "SoundObservation /\nDistressObservation" as OBS
+
+    component "vg_event_sm\n三级风险状态机 + 五类规则\n+ 并发仲裁 + snooze\n+ 夜间/时钟降级" as SM
+
+    component "vg_event_log\n100 条环形日志" as LOG
+    component "vg_ui\nLCD 三页面" as UI
+    component "vg_indicator\n提示音 + LED" as INDICATOR
+    component "vg_input\n按键/串口" as INPUT
+
+    component "vg_notifier" as NOTIFIER
+    component "vg_agent\nSkill 文案" as AGENT
+    component "vg_uploader\n幂等队列 + 断网补发" as UPLOADER
+}
+
+node "prototype/console\nNode 零依赖控制台 + SQLite" as CONSOLE
+
+actor "家属手机浏览器\n（局域网，零 App、\n零账号、零公网）" as BROWSER
+
+MIC --> CAPTURE
+CAPTURE --> FEATURE
+FEATURE --> CLS_ENV
+FEATURE --> CLS_VOICE
+FEATURE --> ENROLL
+
+CLS_ENV --> OBS
+CLS_VOICE --> OBS
+ENROLL --> OBS
+
+OBS --> SM
+SM --> LOG : 事件记录
+SM --> UI : 界面更新
+SM --> INDICATOR : 提示音/LED
+INPUT --> SM : 用户交互
+
+SM --> NOTIFIER : 仅"无人确认→紧急"
+NOTIFIER --> AGENT : Skill 文案生成
+NOTIFIER --> UPLOADER
+
+UPLOADER --> CONSOLE : HTTP POST 结构化摘要\n（无音频、无对话文本）
+CONSOLE --> BROWSER : SSE 实时推送
+
+@enduml
 ```
 
 **依赖方向是单向的**：识别产生事件 → 状态机决定处置 → 硬件执行交互 →
@@ -60,21 +94,57 @@
 
 ### 状态与等级
 
-```text
-                 观测命中
-   正常监测 ──────────────► 可疑(SUSPECT)
-                              │ 达到规则阈值
-      ┌───────────────────────┼───────────────────────┐
-      ▼                       ▼                       ▼
-   提醒(NOTICE)           警告(WARNING)          紧急(EMERGENCY)
-   只显示+轻提示          倒计时等待确认          持续提醒 + 远程通知
-      │                       │                       │
-      │              ┌────────┼────────┐              │
-      │         已处理│    稍后提醒│  超时│             │已处理/误报
-      │              ▼        ▼        ▼              ▼
-      └──────────► 已关闭   挂起10分钟  无人响应 ──────► 已关闭
-                            (最多2次)      │
-                                           └──► 升级为紧急
+> 完整 PlantUML 源码：[state_machine.puml](diagrams/state_machine.puml)
+
+```plantuml
+@startuml 状态机
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title 状态机（PRD-03）- 状态与等级
+
+state "正常监测" as NORMAL
+state "可疑(SUSPECT)" as SUSPECT
+state "提醒(NOTICE)" as NOTICE
+state "警告(WARNING)" as WARNING
+state "紧急(EMERGENCY)" as EMERGENCY
+state "已关闭" as CLOSED
+state "挂起\n（最多2次）" as SNOOZE
+
+NORMAL --> SUSPECT : 观测命中
+
+SUSPECT --> NOTICE : 达到规则阈值\n只显示+轻提示
+SUSPECT --> WARNING : 达到规则阈值\n倒计时等待确认
+SUSPECT --> EMERGENCY : 达到规则阈值\n持续提醒+远程通知
+
+note right of NOTICE
+  只显示+轻提示
+end note
+
+note right of WARNING
+  倒计时等待确认
+end note
+
+note right of EMERGENCY
+  持续提醒 + 远程通知
+end note
+
+NOTICE --> CLOSED : 已处理
+WARNING --> CLOSED : 已处理
+WARNING --> SNOOZE : 稍后提醒
+WARNING --> EMERGENCY : 超时无人响应
+EMERGENCY --> CLOSED : 已处理/误报
+SNOOZE --> CLOSED : 已处理
+SNOOZE --> WARNING : 恢复监测
+
+EMERGENCY --> CLOSED : 无人响应\n升级后关闭
+
+note bottom of SNOOZE
+  挂起 10 分钟
+  最多 2 次
+end note
+
+@enduml
 ```
 
 事件轨道按 `eventType` 各一条，互不干扰；同时活跃时按
@@ -106,12 +176,82 @@
 
 ## 四、识别引擎（PRD-01 / 07）
 
-```
-16kHz 单声道 1s 窗口（50% 重叠）
-  → 预加重 0.97 → Hamming 25ms/10ms → 512 点 FFT
-  → 26 路 Mel(20~7800Hz) → log → DCT → 13 维 MFCC
-  → 均值(13) + 标准差(13) + 一阶差分均值(13) + 过零率(1) = 40 维
-  → 两层 MLP（int8 权重 + float 偏置 + ReLU + Softmax）
+> 完整 PlantUML 源码：[recognition_engine.puml](diagrams/recognition_engine.puml)
+
+```plantuml
+@startuml 识别引擎
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title 识别引擎（PRD-01 / 07）- 处理流程
+
+start
+
+:16kHz 单声道 1s 窗口
+（50% 重叠）;
+
+:预加重 0.97;
+
+:Hamming 窗
+25ms 帧移 / 10ms 帧长;
+
+:512 点 FFT;
+
+:26 路 Mel 滤波器组
+（20~7800Hz）;
+
+:取对数 log;
+
+:DCT 变换
+→ 13 维 MFCC;
+
+:提取 40 维特征向量
+均值(13) + 标准差(13)
++ 一阶差分均值(13)
++ 过零率(1);
+
+if (能量 < -55 dBFS\n静音窗口？) then (是)
+    :跳过推理
+    省电 + 抑制底噪误报;
+    stop
+else (否)
+endif
+
+fork
+    :**环境声景分类**
+    4 分类 MLP
+    other / alarm_beep
+    water_flow / impact;
+fork again
+    :**人声异常检测**
+    4 分类 MLP
+    none / moan
+    scream / shout_help;
+fork again
+    :**个性化模板匹配**
+    归一化欧氏距离
+    → matchedPhrase
+    → personLabel
+    → urgency;
+end fork
+
+:合并三条通道结果;
+
+:输出 SoundObservation
+或 DistressObservation;
+
+stop
+
+note right
+  **为什么是 MLP 不是 DS-CNN**
+  PRD-07 降级决断表：板端量化推理
+  2 个工作日内跑不通 → 降级 MFCC
+  + 小型分类器，权重导出 C 数组
+  接口保持不变，后续换 DS-CNN
+  只需替换 vg_classifier.c
+end note
+
+@enduml
 ```
 
 三条通道共享同一个窗口的同一份特征，只算一次：

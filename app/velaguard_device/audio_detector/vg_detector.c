@@ -41,36 +41,26 @@ static uint64_t vg_micros(void)
   return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
 }
 
-/* 急促程度估计：类别基线 + 能量修正，范围 0~1 */
+/* 急促程度估计：声学量估计，范围 0~1。
+ *
+ * 分类器合并为 none/distress 后（2026-08 定稿），呻吟/尖叫的区分改由
+ * 声学量承担：谱质心（实测呻吟约 0.12、尖叫约 0.43，训练集均值）是
+ * 最强的分离量，叠加能量与过零率修正。呻吟落在 0.3~0.45 档（本地
+ * 询问），尖叫落在 0.8+ 档（快速升级），与旧的类别基线行为一致。
+ */
 
-static float vg_estimate_urgency(vg_voice_kind_t kind, float energy_db,
-                                 float zcr)
+static float vg_estimate_urgency(const float *feat, float energy_db)
 {
-  float base;
+  float base = 0.25f;
 
-  switch (kind)
-    {
-      case VG_VOICE_SCREAM:
-        base = 0.85f;
-        break;
+  /* 谱质心：0.12(呻吟) -> +0.14；0.43(尖叫) -> +0.52 */
 
-      case VG_VOICE_SHOUT_HELP:
-        base = 0.75f;
-        break;
-
-      case VG_VOICE_MOAN:
-        base = 0.30f;
-        break;
-
-      default:
-        base = 0.20f;
-        break;
-    }
+  base += feat[VG_FEAT_CENT_MEAN] * 1.2f;
 
   /* 越响、过零率越高，通常越急促 */
 
   base += (energy_db + 40.0f) / 200.0f;
-  base += zcr * 0.2f;
+  base += feat[VG_FEAT_ZCR] * 0.2f;
 
   if (base < 0.0f)
     {
@@ -178,9 +168,7 @@ int vg_detector_process_window(const int16_t *pcm, size_t nsamples)
 
   kind = vg_classify_voice(feat, voice_probs);
   g_stats.last_voice = kind;
-  g_stats.last_voice_conf = voice_probs[kind == VG_VOICE_NONE ? 0 :
-                                        (kind == VG_VOICE_MOAN ? 1 :
-                                         (kind == VG_VOICE_SCREAM ? 2 : 3))];
+  g_stats.last_voice_conf = voice_probs[kind == VG_VOICE_NONE ? 0 : 1];
 
   if (kind != VG_VOICE_NONE)
     {
@@ -190,8 +178,7 @@ int vg_detector_process_window(const int16_t *pcm, size_t nsamples)
       obs.ts_ms = now;
       obs.kind = kind;
       obs.confidence = g_stats.last_voice_conf;
-      obs.urgency = vg_estimate_urgency(kind, energy,
-                                        feat[VG_FEATURE_DIM - 1]);
+      obs.urgency = vg_estimate_urgency(feat, energy);
       obs.repeat_count = 1;
 
       g_stats.voice_hits++;
@@ -217,8 +204,10 @@ int vg_detector_process_window(const int16_t *pcm, size_t nsamples)
       /* 模板本身区分平静/急促，比能量估计更可靠 */
 
       obs.urgency = (match.style == VG_TPL_URGENT) ? 0.85f : 0.20f;
-      if (kind == VG_VOICE_SCREAM || kind == VG_VOICE_SHOUT_HELP)
+      if (kind == VG_VOICE_DISTRESS)
         {
+          /* 模型同时听到痛苦人声：模板命中必然急促 */
+
           obs.urgency = 0.95f;
         }
 

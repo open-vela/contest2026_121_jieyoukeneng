@@ -12,15 +12,24 @@
   # 1) ESC-50（约 600MB，一条命令搞定）
   python3 fetch_public_datasets.py --esc50 --dst ../datasets
 
-  # 2) FSD50K 元数据（仅 7MB）：看清单与许可证分布，再决定要不要下 25GB 音频
+  # 2) FSD50K 元数据（仅 7MB）：看清单与许可证分布，再决定要下哪些 clip
   python3 fetch_public_datasets.py --fsd50k-meta
 
-  # 3) 已经把 FSD50K 音频解压到本地后，映射进来
+  # 3) 按清单逐 clip 下载（推荐）：只取需要的约 8.5k 条，不碰 Zenodo 的 25GB 分卷
+  python3 fetch_public_datasets.py --fsd50k-fetch --dst ../datasets
+
+  # 4) 或者已经把 FSD50K 官方分卷解压到本地了，从本地映射进来
   python3 fetch_public_datasets.py --fsd50k-map /path/to/FSD50K --dst ../datasets
 
   # 只保留授权最干净的 clip（默认只要 CC0 与 CC-BY）
-  python3 fetch_public_datasets.py --fsd50k-map /path/to/FSD50K \\
-      --licenses cc0,by --dst ../datasets
+  python3 fetch_public_datasets.py --fsd50k-fetch --licenses cc0,by --dst ../datasets
+
+为什么不下 Zenodo 分卷
+----------------------
+Zenodo 上 FSD50K 音频是 6 个分卷压缩包（dev 18.4GB + eval 6.3GB），必须全部
+下齐才能合并解压，解压后峰值占盘翻倍，而我们只需要其中约 17% 的 clip。
+HuggingFace 镜像把 clip 逐个平铺存放，可以按 ID 精确取用、断点续传、落盘即
+最终形态。Zenodo 仍用于取 7MB 元数据（--fsd50k-meta），那部分不可替代。
 
 命名约定
 --------
@@ -36,7 +45,9 @@ import io
 import json
 import os
 import sys
+import threading
 import time
+import urllib.error
 import urllib.request
 import wave
 import zipfile
@@ -51,6 +62,11 @@ from prepare_dataset import read_wav, resample_linear, write_wav, TARGET_SR  # n
 ESC50_ZIP = "https://github.com/karolpiczak/ESC-50/archive/master.zip"
 ESC50_META = "https://raw.githubusercontent.com/karolpiczak/ESC-50/master/meta/esc50.csv"
 ZENODO_FSD50K = "https://zenodo.org/api/records/4060432"
+
+# FSD50K 逐 clip 镜像：把官方分卷压缩包平铺成独立 wav，可按 ID 精确取用。
+# 境外直连不通时用 hf-mirror；设 HF_ENDPOINT 可切回 huggingface.co。
+HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
+FSD50K_CLIPS = HF_ENDPOINT + "/datasets/Fhrozen/FSD50k/resolve/main/clips"
 
 # --- 类别映射（依据 model/dataset_sources.md，类别名均已核实存在）-------------
 
@@ -289,18 +305,164 @@ def do_fsd50k_meta():
 
     print(f"\n候选清单已写出：{os.path.relpath(out, HERE)}")
     print(f"其中 CC0 + CC-BY（授权最干净）共 {len(total_clean)} 条 clip")
-    print("\n下一步：下载 FSD50K.dev_audio / eval_audio 解压后执行")
-    print("  python3 fetch_public_datasets.py --fsd50k-map <解压目录> --dst ../datasets")
+    print("\n下一步：按清单逐 clip 下载（约 5.5GB，不需要 Zenodo 的 25GB 分卷）")
+    print("  python3 fetch_public_datasets.py --fsd50k-fetch --dst ../datasets")
+
+
+def load_candidates(licenses):
+    """读候选清单 -> {clip_id: target_class}。
+
+    同一 clip 可能带多个我们关心的标签：若都映射到同一目标类（如 Glass 与
+    Shatter 都是 impact）只保留一份；若映射到不同目标类（如既是 Water 又是
+    Knock）则整条丢弃——CONFLICT 表只挡了标签层面的混杂，跨目标类的这 192 条
+    必须在这里挡掉，否则同一段音频会同时成为两个类的正样本。
+    """
+    cand = os.path.join(HERE, "reports", "fsd50k_candidates.csv")
+    if not os.path.exists(cand):
+        raise RuntimeError("请先运行 --fsd50k-meta 生成候选清单")
+
+    allow = {x.strip() for x in licenses.split(",")} if licenses else None
+    targets = {}
+    lic_of = {}
+    skipped_lic = 0
+    for r in csv.DictReader(open(cand, encoding="utf-8")):
+        if allow and r["license"] not in allow:
+            skipped_lic += 1
+            continue
+        targets.setdefault(r["clip_id"], set()).add(r["target_class"])
+        lic_of[r["clip_id"]] = r["license"]
+
+    keep = {cid: next(iter(t)) for cid, t in targets.items() if len(t) == 1}
+    conflict = len(targets) - len(keep)
+    return keep, lic_of, skipped_lic, conflict
+
+
+def fsd50k_clip_url(clip_id, split):
+    return f"{FSD50K_CLIPS}/{split}/{clip_id}.wav"
+
+
+class _Redirect308(urllib.request.HTTPRedirectHandler):
+    """Python 3.10 及更早的 urllib 不认 308，而 HF 镜像正是用 308 跳到 CDN。"""
+
+    def http_error_308(self, req, fp, code, msg, headers):
+        return self.http_error_307(req, fp, 307, msg, headers)
+
+
+_OPENER = urllib.request.build_opener(_Redirect308)
+
+
+def fetch_clip(clip_id, timeout=60, tries=3):
+    """按 clip_id 取音频。清单里没记 dev/eval 归属，先试 dev 再回退 eval。"""
+    err = None
+    for attempt in range(tries):
+        for split in ("dev", "eval"):
+            try:
+                with _OPENER.open(
+                        fsd50k_clip_url(clip_id, split), timeout=timeout) as r:
+                    return r.read(), split
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:          # 不在这个 split，换一个
+                    err = exc
+                    continue
+                err = exc
+            except Exception as exc:         # noqa: BLE001
+                err = exc
+        if attempt + 1 < tries:
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"clip {clip_id} 取回失败: {err}")
+
+
+def do_fsd50k_fetch(dst, licenses, workers, limit):
+    keep, lic_of, skipped_lic, conflict = load_candidates(licenses)
+
+    todo = []
+    have = 0
+    for clip_id, target in sorted(keep.items()):
+        out = os.path.join(dst, target, f"fsd50k-{clip_id}__000.wav")
+        if os.path.exists(out):
+            have += 1
+            continue
+        todo.append((clip_id, target, out))
+
+    if limit:
+        todo = todo[:limit]
+
+    print(f"候选 clip {len(keep)} 条（许可证过滤跳过 {skipped_lic} 行，"
+          f"跨目标类冲突丢弃 {conflict} 条）")
+    print(f"已在本地 {have} 条，本次待下载 {len(todo)} 条，并发 {workers}")
+    if not todo:
+        print("没有需要下载的 clip")
+        return
+
+    for target in sorted({t for _, t, _ in todo}):
+        os.makedirs(os.path.join(dst, target), exist_ok=True)
+
+    lock = threading.Lock()
+    counts = {}
+    splits = {}
+    failed = []
+    too_short = []
+    done = [0]
+    t0 = time.time()
+
+    def work(item):
+        clip_id, target, out = item
+        try:
+            raw, split = fetch_clip(clip_id)
+        except Exception as exc:                        # noqa: BLE001
+            with lock:
+                failed.append((clip_id, str(exc)))
+                done[0] += 1
+            return
+
+        # 先落到 .part 再改名，中途中断不会留下半个 wav 让续传误判为已完成
+        part = out + ".part"
+        ok = convert(raw, part)                         # -> 16kHz 单声道
+        if ok:
+            os.replace(part, out)
+        with lock:
+            done[0] += 1
+            if ok:
+                counts[target] = counts.get(target, 0) + 1
+                splits[split] = splits.get(split, 0) + 1
+            else:
+                too_short.append(clip_id)
+            n = done[0]
+            if n % 200 == 0 or n == len(todo):
+                el = time.time() - t0
+                rate = n / el if el > 0 else 0
+                eta = (len(todo) - n) / rate if rate > 0 else 0
+                print(f"  {n}/{len(todo)}  {rate:.1f} clip/s  "
+                      f"剩余约 {eta / 60:.1f} 分钟  失败 {len(failed)}")
+
+    # 逐 clip 下载是网络 IO 密集型，线程池即可；并发过高会被镜像限速
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(work, todo))
+
+    print("\nFSD50K 下载结果：")
+    for k in sorted(counts):
+        print(f"  {k:12s} {counts[k]:5d} 条")
+    print(f"  来源切分：dev {splits.get('dev', 0)} / eval {splits.get('eval', 0)}")
+    if too_short:
+        print(f"（{len(too_short)} 条短于 0.5 秒已丢弃）")
+    if failed:
+        print(f"\n失败 {len(failed)} 条，重跑本命令即可续传（已下载的会跳过）：")
+        for cid, msg in failed[:10]:
+            print(f"  {cid}: {msg}")
+        if len(failed) > 10:
+            print(f"  ... 另有 {len(failed) - 10} 条")
+    print(f"\n耗时 {(time.time() - t0) / 60:.1f} 分钟")
+    print("提醒：用到的每条 clip 都要按其许可证署名，"
+          "清单见 reports/fsd50k_candidates.csv")
 
 
 def do_fsd50k_map(root, dst, licenses):
-    cand = os.path.join(HERE, "reports", "fsd50k_candidates.csv")
-    if not os.path.exists(cand):
-        print("请先运行 --fsd50k-meta 生成候选清单", file=sys.stderr)
+    try:
+        keep, _, skipped_lic, conflict = load_candidates(licenses)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
         return
-
-    allow = {x.strip() for x in licenses.split(",")} if licenses else None
-    rows = list(csv.DictReader(open(cand, encoding="utf-8")))
 
     # 建立 clip_id -> 实际文件路径（dev_audio / eval_audio 目录结构可能不同）
     index = {}
@@ -312,20 +474,14 @@ def do_fsd50k_map(root, dst, licenses):
     print(f"在 {root} 下找到 {len(index)} 个 wav")
 
     counts = {}
-    skipped_lic = 0
-    for r in rows:
-        if allow and r["license"] not in allow:
-            skipped_lic += 1
-            continue
-
-        src = index.get(r["clip_id"])
+    for clip_id, target in sorted(keep.items()):
+        src = index.get(clip_id)
         if src is None:
             continue
 
-        target = r["target_class"]
         outdir = os.path.join(dst, target)
         os.makedirs(outdir, exist_ok=True)
-        out = os.path.join(outdir, f"fsd50k-{r['clip_id']}__000.wav")
+        out = os.path.join(outdir, f"fsd50k-{clip_id}__000.wav")
         if os.path.exists(out):
             continue
         if convert(src, out):
@@ -335,8 +491,10 @@ def do_fsd50k_map(root, dst, licenses):
     for k in sorted(counts):
         print(f"  {k:12s} {counts[k]:5d} 条")
     if skipped_lic:
-        print(f"（按许可证过滤跳过 {skipped_lic} 条；"
+        print(f"（按许可证过滤跳过 {skipped_lic} 行；"
               f"当前只接受 {licenses}）")
+    if conflict:
+        print(f"（跨目标类冲突丢弃 {conflict} 条）")
     print("\n提醒：用到的每条 clip 都要按其许可证署名，"
           "清单见 reports/fsd50k_candidates.csv")
 
@@ -348,19 +506,27 @@ def main():
     ap.add_argument("--esc50", action="store_true", help="下载并映射 ESC-50")
     ap.add_argument("--fsd50k-meta", action="store_true",
                     help="只下 FSD50K 元数据（7MB），输出候选清单与许可证分布")
+    ap.add_argument("--fsd50k-fetch", action="store_true",
+                    help="按候选清单从 HF 镜像逐 clip 下载（推荐，约 5.5GB）")
     ap.add_argument("--fsd50k-map", metavar="DIR",
-                    help="把本地已解压的 FSD50K 音频映射进来")
+                    help="把本地已解压的 FSD50K 官方分卷映射进来")
+    ap.add_argument("--workers", type=int, default=16,
+                    help="逐 clip 下载的并发数（默认 16）")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="只下前 N 条，用于先小跑一段确认链路")
     ap.add_argument("--licenses", default="cc0,by",
-                    help="映射时接受的许可证，逗号分隔；填 all 表示不过滤")
+                    help="接受的许可证，逗号分隔；填 all 表示不过滤")
     ap.add_argument("--dst", default=os.path.join(HERE, "..", "datasets"))
     ap.add_argument("--cache", default=os.path.join(HERE, ".cache"))
     args = ap.parse_args()
 
-    if not (args.esc50 or args.fsd50k_meta or args.fsd50k_map):
+    if not (args.esc50 or args.fsd50k_meta or args.fsd50k_fetch
+            or args.fsd50k_map):
         ap.print_help()
         return 1
 
     dst = os.path.abspath(args.dst)
+    licenses = None if args.licenses == "all" else args.licenses
 
     if args.esc50:
         do_esc50(dst, os.path.abspath(args.cache))
@@ -368,16 +534,18 @@ def main():
     if args.fsd50k_meta:
         do_fsd50k_meta()
 
-    if args.fsd50k_map:
-        do_fsd50k_map(os.path.abspath(args.fsd50k_map), dst,
-                      None if args.licenses == "all" else args.licenses)
+    if args.fsd50k_fetch:
+        do_fsd50k_fetch(dst, licenses, args.workers, args.limit)
 
-    if args.esc50 or args.fsd50k_map:
+    if args.fsd50k_map:
+        do_fsd50k_map(os.path.abspath(args.fsd50k_map), dst, licenses)
+
+    if args.esc50 or args.fsd50k_fetch or args.fsd50k_map:
         print(f"\n数据目录：{dst}")
         print("下一步：python3 train_models.py --data-dir "
               f"{os.path.relpath(dst, HERE)}")
-        print("注意：呻吟(moan) 与 姓名/方言求救词 无公开数据，必须自采，"
-              "见 dataset_sources.md 第四节")
+        print("注意：姓名/方言求救短语走端侧 enroll 现场录入（vg_enroll），"
+              "不需要训练数据；见 dataset_sources.md 第四节")
 
     return 0
 

@@ -173,7 +173,7 @@ vg_voice_kind_t vg_classify_voice(const float *feat, float *probs)
 {
   static const vg_voice_kind_t map[VG_VOICE_CLASSES] =
     {
-      VG_VOICE_NONE, VG_VOICE_MOAN, VG_VOICE_SCREAM, VG_VOICE_SHOUT_HELP
+      VG_VOICE_NONE, VG_VOICE_DISTRESS
     };
   int best;
 
