@@ -199,6 +199,15 @@ static int vg_cmd_sim(int argc, char **argv)
          times, vg_event_type_str(type), (double)conf, (double)urgency);
   vg_ui_set_page(VG_PAGE_EVENT);
   vg_print_page();
+
+  /* 给上传模块一个机会发送事件（独立进程模式下 daemon 不会自动 tick） */
+
+  for (i = 0; i < 5; i++)
+    {
+      vg_uploader_tick();
+      usleep(200000);
+    }
+
   return 0;
 }
 

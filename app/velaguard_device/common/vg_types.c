@@ -61,7 +61,8 @@ static const char * const g_sound_class_str[VG_SOUND_CLASS_MAX] =
 
 static const char * const g_voice_kind_str[VG_VOICE_KIND_MAX] =
 {
-  "none", "moan", "scream", "shout_help", "name_call", "help_phrase"
+  "none", "moan", "scream", "shout_help", "name_call", "help_phrase",
+  "distress"
 };
 
 /* PRD-03 并发仲裁：同级别按类别优先级

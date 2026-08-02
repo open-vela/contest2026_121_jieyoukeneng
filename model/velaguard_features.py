@@ -22,11 +22,17 @@ FFT_SIZE = 512
 NUM_MEL = 26
 NUM_MFCC = 13
 FEATURE_DIM = NUM_MFCC * 3 + 1
+FEATURE_DIM_V2 = FEATURE_DIM + 13
 MAX_FRAMES = 100
 PREEMPH = 0.97
 MEL_LOW = 20.0
 MEL_HIGH = 7800.0
 EPS = 1e-10
+
+# v2 谱形特征的频带分界（bin 索引；1kHz=32、4kHz=128、奈奎斯特=256）
+BIN_1K = 1000 * FFT_SIZE // SAMPLE_RATE
+BIN_4K = 4000 * FFT_SIZE // SAMPLE_RATE
+NYQ_BIN = FFT_SIZE // 2
 
 
 def _hz2mel(hz):
@@ -65,15 +71,19 @@ _DCT = _dct_matrix()
 _HAMMING = 0.54 - 0.46 * np.cos(2 * np.pi * np.arange(FRAME_LEN) / (FRAME_LEN - 1))
 
 
-def mfcc(pcm_int16):
-    """返回 (nframes, NUM_MFCC) 的 MFCC 矩阵。"""
+def _frames(pcm_int16):
+    """分帧主循环：返回 (MFCC 矩阵, 帧功率谱矩阵)。
+
+    与端侧 C 同一循环结构；v2 的帧级能量/谱形统计与 MFCC 共用这一遍
+    FFT，端侧不增加第二次分帧开销。
+    """
     x = np.asarray(pcm_int16, dtype=np.int16)
     if x.size < FRAME_LEN:
-        return np.zeros((0, NUM_MFCC))
+        return (np.zeros((0, NUM_MFCC)),
+                np.zeros((0, FFT_SIZE // 2 + 1)))
 
-    offsets = range(0, x.size - FRAME_LEN + 1, FRAME_HOP)
-    out = []
-    for n, off in enumerate(offsets):
+    mf, pw = [], []
+    for n, off in enumerate(range(0, x.size - FRAME_LEN + 1, FRAME_HOP)):
         if n >= MAX_FRAMES:
             break
         frame = x[off:off + FRAME_LEN].astype(np.float64)
@@ -85,9 +95,18 @@ def mfcc(pcm_int16):
         spec = np.fft.rfft(emph, n=FFT_SIZE)
         power = (spec.real ** 2 + spec.imag ** 2)
         mel = np.log(_FB @ power + EPS)
-        out.append((_DCT @ mel) / NUM_MEL)
+        mf.append((_DCT @ mel) / NUM_MEL)
+        pw.append(power)
 
-    return np.array(out) if out else np.zeros((0, NUM_MFCC))
+    if not mf:
+        return (np.zeros((0, NUM_MFCC)),
+                np.zeros((0, FFT_SIZE // 2 + 1)))
+    return np.array(mf), np.array(pw)
+
+
+def mfcc(pcm_int16):
+    """返回 (nframes, NUM_MFCC) 的 MFCC 矩阵。"""
+    return _frames(pcm_int16)[0]
 
 
 def extract(pcm_int16):
@@ -106,6 +125,70 @@ def extract(pcm_int16):
     if x.size > 1:
         signs = x >= 0
         feat[-1] = np.count_nonzero(signs[1:] != signs[:-1]) / (x.size - 1)
+
+    return feat
+
+
+def extract_v2(pcm_int16):
+    """v2 = v1 的 40 维原样保留 + 追加 13 维瞬态/时序/谱形描述子。
+
+    动机（2026-08 指标分析）：40 维 MFCC 统计量把窗内时间轴压扁，表达
+    不了「短促」（impact/alarm 的瞬态结构）与「音色亮度」（moan 低质心
+    vs scream 高质心）；数据量 x8.8、波形增广、类别平衡三个实验均无法
+    突破该表征缺口。新维度全部来自 MFCC 同一遍 FFT 的副产品，端侧计算
+    增量 <5%。与 vg_feature.c 的同步在训练验证有效后进行。
+
+    追加维度（索引 40-52）：
+      40 crest        帧能量峰值 - 均值（dB），瞬态高、稳态低
+      41 max_rise     最大帧间能量上升（dB），onset 强度
+      42 max_fall     最大帧间能量下降（dB），impact 快衰减 vs alarm 平台
+      43 high_ratio   能量高于窗均值的帧占比，瞬态低、稳态约 0.5+
+      44-47 seg_env   4 段能量均值 - 全窗均值（dB），粗粒度时序轮廓
+      48 cent_mean    谱质心均值（bin/奈奎斯特 bin 归一 0~1）
+      49 cent_std     谱质心标准差
+      50 cent_dmean   谱质心帧间变化均值（扫频报警 vs 稳定音调）
+      51 hf1k_mean    >1kHz 能量占比均值
+      52 hf4k_mean    >4kHz 能量占比均值
+    """
+    x = np.asarray(pcm_int16, dtype=np.int16)
+    m, pw = _frames(x)
+    if m.shape[0] == 0:
+        return None
+
+    feat = np.zeros(FEATURE_DIM_V2, dtype=np.float64)
+    feat[:NUM_MFCC] = m.mean(axis=0)
+    feat[NUM_MFCC:NUM_MFCC * 2] = m.std(axis=0)
+    if m.shape[0] > 1:
+        feat[NUM_MFCC * 2:NUM_MFCC * 3] = np.abs(np.diff(m, axis=0)).mean(axis=0)
+    if x.size > 1:
+        signs = x >= 0
+        feat[FEATURE_DIM - 1] = (np.count_nonzero(signs[1:] != signs[:-1])
+                                 / (x.size - 1))
+
+    nf = pw.shape[0]
+    e_lin = pw.sum(axis=1)                          # 帧能量（线性）
+    e_db = 10.0 * np.log10(e_lin + EPS)
+    e_mean = e_db.mean()
+
+    feat[40] = e_db.max() - e_mean
+    if nf > 1:
+        d = np.diff(e_db)
+        feat[41] = d.max()
+        feat[42] = -d.min()
+    feat[43] = float((e_db > e_mean).mean())
+
+    if nf >= 4:
+        for i, seg in enumerate(np.array_split(e_db, 4)):
+            feat[44 + i] = seg.mean() - e_mean
+
+    bins = np.arange(pw.shape[1], dtype=np.float64)
+    cent = (pw @ bins) / (e_lin + EPS) / NYQ_BIN    # 逐帧归一化谱质心
+    feat[48] = cent.mean()
+    feat[49] = cent.std()
+    if nf > 1:
+        feat[50] = np.abs(np.diff(cent)).mean()
+    feat[51] = float((pw[:, BIN_1K:].sum(axis=1) / (e_lin + EPS)).mean())
+    feat[52] = float((pw[:, BIN_4K:].sum(axis=1) / (e_lin + EPS)).mean())
 
     return feat
 

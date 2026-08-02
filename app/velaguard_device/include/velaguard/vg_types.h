@@ -102,16 +102,22 @@ typedef enum
   VG_SOUND_CLASS_MAX
 } vg_sound_class_t;
 
-/* 识别层人声异常类别 (PRD-01 人声通道 + PRD-02 模板通道) */
+/* 识别层人声异常类别 (PRD-01 人声通道 + PRD-02 模板通道)
+ *
+ * 2026-08 起模型通道输出二分类（NONE/DISTRESS），moan/scream/shout_help
+ * 三个细分值保留：协议字符串向后兼容，自检场景仍用它们构造注入观测
+ *（状态机对三者与 DISTRESS 的处置完全相同）。
+ */
 
 typedef enum
 {
   VG_VOICE_NONE = 0,
-  VG_VOICE_MOAN,              /* 呻吟 */
-  VG_VOICE_SCREAM,            /* 痛苦叫声/哭喊 */
-  VG_VOICE_SHOUT_HELP,        /* 连续呼救 */
+  VG_VOICE_MOAN,              /* 呻吟（保留：注入/协议兼容） */
+  VG_VOICE_SCREAM,            /* 痛苦叫声/哭喊（保留：注入/协议兼容） */
+  VG_VOICE_SHOUT_HELP,        /* 连续呼救（保留：注入/协议兼容） */
   VG_VOICE_NAME_CALL,         /* 呼喊姓名/亲属称呼 */
   VG_VOICE_HELP_PHRASE,       /* 明确求救短语（含方言） */
+  VG_VOICE_DISTRESS,          /* 模型通道输出：痛苦人声（三类合并） */
   VG_VOICE_KIND_MAX
 } vg_voice_kind_t;
 

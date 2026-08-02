@@ -36,6 +36,15 @@ static float g_cos_tab[VG_FFT_SIZE / 2];
 static float g_sin_tab[VG_FFT_SIZE / 2];
 static int   g_tables_ready;
 
+/* v2 帧级统计缓存：由 vg_feature_mfcc 在同一遍 FFT 中填充，
+ * vg_feature_extract 紧随其后聚合成 13 维描述子
+ */
+
+static float g_frame_edb[VG_MAX_FRAMES];    /* 帧能量 (dB) */
+static float g_frame_cent[VG_MAX_FRAMES];   /* 归一化谱质心 */
+static float g_frame_hf1k[VG_MAX_FRAMES];   /* >1kHz 能量占比 */
+static float g_frame_hf4k[VG_MAX_FRAMES];   /* >4kHz 能量占比 */
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -237,6 +246,39 @@ int vg_feature_mfcc(const int16_t *pcm, size_t nsamples, float *mfcc)
 
       vg_fft(re, im);
 
+      /* 帧级功率谱统计（v2）：能量、谱质心、高频占比。
+       * 与 model/velaguard_features.py _frames() 逐步骤一致。
+       */
+
+        {
+          float p_sum = 0.0f;
+          float p_wsum = 0.0f;
+          float p_hf1k = 0.0f;
+          float p_hf4k = 0.0f;
+
+          for (j = 0; j <= VG_FFT_SIZE / 2; j++)
+            {
+              float p = re[j] * re[j] + im[j] * im[j];
+
+              p_sum += p;
+              p_wsum += (float)j * p;
+              if (j >= VG_BIN_1K)
+                {
+                  p_hf1k += p;
+                }
+
+              if (j >= VG_BIN_4K)
+                {
+                  p_hf4k += p;
+                }
+            }
+
+          g_frame_edb[nframes] = 10.0f * log10f(p_sum + VG_EPS);
+          g_frame_cent[nframes] = p_wsum / (p_sum + VG_EPS) / VG_NYQ_BIN;
+          g_frame_hf1k[nframes] = p_hf1k / (p_sum + VG_EPS);
+          g_frame_hf4k[nframes] = p_hf4k / (p_sum + VG_EPS);
+        }
+
       /* 功率谱 -> mel 能量 */
 
       for (i = 0; i < VG_NUM_MEL; i++)
@@ -340,8 +382,108 @@ int vg_feature_extract(const int16_t *pcm, size_t nsamples, float *feat)
         }
     }
 
-  feat[VG_FEATURE_DIM - 1] = (nsamples > 1)
-                             ? (float)zc / (float)(nsamples - 1) : 0.0f;
+  feat[VG_FEAT_ZCR] = (nsamples > 1)
+                      ? (float)zc / (float)(nsamples - 1) : 0.0f;
+
+  /* ---- v2 追加维度（40-52），与 extract_v2() 逐维一致 ---- */
+
+    {
+      float e_mean = 0.0f;
+      float e_max;
+      float max_rise = 0.0f;
+      float max_fall = 0.0f;
+      float c_sum = 0.0f;
+      float c_sum2 = 0.0f;
+      float c_dsum = 0.0f;
+      float hf1k_sum = 0.0f;
+      float hf4k_sum = 0.0f;
+      float var;
+      int   nhigh = 0;
+
+      e_max = g_frame_edb[0];
+      for (f = 0; f < nframes; f++)
+        {
+          e_mean += g_frame_edb[f];
+          if (g_frame_edb[f] > e_max)
+            {
+              e_max = g_frame_edb[f];
+            }
+
+          if (f > 0)
+            {
+              float d = g_frame_edb[f] - g_frame_edb[f - 1];
+
+              if (d > max_rise)
+                {
+                  max_rise = d;
+                }
+
+              if (-d > max_fall)
+                {
+                  max_fall = -d;
+                }
+
+              c_dsum += fabsf(g_frame_cent[f] - g_frame_cent[f - 1]);
+            }
+
+          c_sum += g_frame_cent[f];
+          c_sum2 += g_frame_cent[f] * g_frame_cent[f];
+          hf1k_sum += g_frame_hf1k[f];
+          hf4k_sum += g_frame_hf4k[f];
+        }
+
+      e_mean /= nframes;
+
+      for (f = 0; f < nframes; f++)
+        {
+          if (g_frame_edb[f] > e_mean)
+            {
+              nhigh++;
+            }
+        }
+
+      feat[VG_FEAT_CREST] = e_max - e_mean;
+      feat[41] = (nframes > 1) ? max_rise : 0.0f;
+      feat[42] = (nframes > 1) ? max_fall : 0.0f;
+      feat[43] = (float)nhigh / (float)nframes;
+
+      /* 4 段能量轮廓（相对全窗均值）；分段规则与 np.array_split 一致：
+       * 前 rem 段各 base+1 帧，其余 base 帧。帧数不足 4 时置 0。
+       */
+
+      if (nframes >= 4)
+        {
+          int base = nframes / 4;
+          int rem = nframes % 4;
+          int pos = 0;
+
+          for (i = 0; i < 4; i++)
+            {
+              int len = base + (i < rem ? 1 : 0);
+              float acc = 0.0f;
+
+              for (f = 0; f < len; f++)
+                {
+                  acc += g_frame_edb[pos + f];
+                }
+
+              feat[44 + i] = acc / len - e_mean;
+              pos += len;
+            }
+        }
+      else
+        {
+          feat[44] = feat[45] = feat[46] = feat[47] = 0.0f;
+        }
+
+      feat[VG_FEAT_CENT_MEAN] = c_sum / nframes;
+      var = c_sum2 / nframes -
+            (c_sum / nframes) * (c_sum / nframes);
+      feat[49] = (var > 0.0f) ? sqrtf(var) : 0.0f;
+      feat[50] = (nframes > 1) ? c_dsum / (nframes - 1) : 0.0f;
+      feat[51] = hf1k_sum / nframes;
+      feat[VG_FEAT_HF4K] = hf4k_sum / nframes;
+    }
 
   return VG_FEATURE_DIM;
 }
