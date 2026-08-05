@@ -14,6 +14,7 @@
 #ifdef CONFIG_VELAGUARD_UI_LVGL
 
 #include <pthread.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -80,7 +81,10 @@ static void *vg_lvgl_thread(void *arg)
 
   (void)arg;
 
+  printf("[velaguard] LVGL线程启动，栈大小=%d\n",
+         CONFIG_VELAGUARD_UI_STACKSIZE);
   lv_init();
+  printf("[velaguard] LVGL核心初始化完成\n");
   lv_nuttx_dsc_init(&info);
 #ifdef CONFIG_LV_USE_NUTTX_LCD
   /* Gemini-S1 exposes the ILI9341 through NuttX's LCD device. */
@@ -88,6 +92,8 @@ static void *vg_lvgl_thread(void *arg)
 #endif
 
   lv_nuttx_init(&info, &g_result);
+  printf("[velaguard] LVGL设备初始化完成，disp=%p\n",
+         g_result.disp);
 
   /* 必要延时，影响初始化顺序（Gemini-S1 板级踩坑，无此延时 display 不上屏） */
 
@@ -140,6 +146,7 @@ static void *vg_lvgl_thread(void *arg)
 int vg_ui_lvgl_start(void)
 {
   pthread_attr_t attr;
+  int ret;
 
   if (g_running)
     {
@@ -147,10 +154,28 @@ int vg_ui_lvgl_start(void)
     }
 
   g_running = true;
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, CONFIG_VELAGUARD_UI_STACKSIZE);
-  if (pthread_create(&g_thread, &attr, vg_lvgl_thread, NULL) != 0)
+  ret = pthread_attr_init(&attr);
+  if (ret != 0)
     {
+      printf("[velaguard] LVGL线程属性初始化失败: %d\n", ret);
+      g_running = false;
+      return -1;
+    }
+
+  ret = pthread_attr_setstacksize(&attr, CONFIG_VELAGUARD_UI_STACKSIZE);
+  if (ret != 0)
+    {
+      printf("[velaguard] LVGL线程栈设置失败: %d\n", ret);
+      pthread_attr_destroy(&attr);
+      g_running = false;
+      return -1;
+    }
+
+  ret = pthread_create(&g_thread, &attr, vg_lvgl_thread, NULL);
+  if (ret != 0)
+    {
+      printf("[velaguard] LVGL线程创建失败: %d (%s)\n",
+             ret, strerror(ret));
       g_running = false;
       pthread_attr_destroy(&attr);
       return -1;
