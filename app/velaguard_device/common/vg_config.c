@@ -3,6 +3,7 @@
  ****************************************************************************/
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,11 +33,16 @@ void vg_config_defaults(vg_config_t *cfg)
 
   memset(cfg, 0, sizeof(*cfg));
 
+  cfg->schema_version = 1;
+  cfg->config_revision = 0;
   vg_strlcpy(cfg->device_id, "velaguard_demo_001", sizeof(cfg->device_id));
   vg_strlcpy(cfg->data_dir, VG_DEFAULT_DATA_DIR, sizeof(cfg->data_dir));
   vg_strlcpy(cfg->console_host, "192.168.43.1", sizeof(cfg->console_host));
   cfg->console_port = 8080;
   vg_strlcpy(cfg->console_path, "/events", sizeof(cfg->console_path));
+  vg_strlcpy(cfg->console_server_name, cfg->console_host,
+             sizeof(cfg->console_server_name));
+  cfg->console_tls = false;
   cfg->webhook_enabled = false;
   cfg->demo_mode = true;
 
@@ -88,6 +94,25 @@ void vg_config_defaults(vg_config_t *cfg)
     {
       vg_strlcpy(cfg->device_id, env, sizeof(cfg->device_id));
     }
+
+  env = getenv("VELAGUARD_DEVICE_TOKEN");
+  if (env != NULL && env[0] != '\0')
+    {
+      vg_strlcpy(cfg->device_token, env, sizeof(cfg->device_token));
+    }
+
+  env = getenv("VELAGUARD_PROFILE");
+  if (env != NULL && strcmp(env, "production") == 0)
+    {
+      cfg->demo_mode = false;
+    }
+
+  env = getenv("VELAGUARD_CONSOLE_TLS");
+  if (env != NULL && (strcmp(env, "1") == 0 ||
+                      strcmp(env, "true") == 0))
+    {
+      cfg->console_tls = true;
+    }
 }
 
 void vg_config_apply_demo(vg_config_t *cfg)
@@ -117,14 +142,144 @@ vg_config_t *vg_config(void)
   return &g_config;
 }
 
+static int vg_config_fail(char *reason, size_t reason_len,
+                          const char *message)
+{
+  if (reason != NULL && reason_len > 0)
+    {
+      snprintf(reason, reason_len, "%s", message);
+    }
+
+  return -1;
+}
+
+static bool vg_config_id_valid(const char *value, size_t capacity)
+{
+  size_t i;
+  size_t n;
+
+  if (value == NULL || capacity == 0 ||
+      memchr(value, '\0', capacity) == NULL)
+    {
+      return false;
+    }
+
+  n = strlen(value);
+  if (n == 0 || n >= capacity)
+    {
+      return false;
+    }
+
+  for (i = 0; i < n; i++)
+    {
+      unsigned char c = (unsigned char)value[i];
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
+        {
+          return false;
+        }
+    }
+
+  return true;
+}
+
+int vg_config_validate(const vg_config_t *cfg, char *reason,
+                       size_t reason_len)
+{
+  if (cfg == NULL)
+    {
+      return vg_config_fail(reason, reason_len, "配置为空");
+    }
+
+  if (cfg->schema_version != 1)
+    {
+      return vg_config_fail(reason, reason_len, "schemaVersion 不支持");
+    }
+
+  if (!vg_config_id_valid(cfg->device_id, sizeof(cfg->device_id)))
+    {
+      return vg_config_fail(reason, reason_len, "deviceId 非法");
+    }
+
+  if (cfg->data_dir[0] != '/' || cfg->console_path[0] != '/')
+    {
+      return vg_config_fail(reason, reason_len, "路径必须是绝对路径");
+    }
+
+  if (cfg->console_host[0] == '\0' || cfg->console_port <= 0 ||
+      cfg->console_port > 65535)
+    {
+      return vg_config_fail(reason, reason_len, "控制台地址或端口非法");
+    }
+
+  if (cfg->console_tls && (cfg->console_ca_path[0] == '\0' ||
+                           cfg->console_server_name[0] == '\0'))
+    {
+      return vg_config_fail(reason, reason_len,
+                            "TLS 必须配置 CA 和服务端名称");
+    }
+
+  if (!cfg->demo_mode && !cfg->console_tls)
+    {
+      return vg_config_fail(reason, reason_len,
+                            "生产 profile 禁止明文 HTTP");
+    }
+
+  if (!cfg->demo_mode && cfg->device_token[0] == '\0')
+    {
+      return vg_config_fail(reason, reason_len,
+                            "生产 profile 缺少设备认证令牌");
+    }
+
+  if (!cfg->demo_mode && cfg->config_signature[0] == '\0')
+    {
+      return vg_config_fail(reason, reason_len,
+                            "生产 profile 缺少配置签名");
+    }
+
+  if (!isfinite(cfg->conf_alarm_beep) || cfg->conf_alarm_beep < 0.0f ||
+      cfg->conf_alarm_beep > 1.0f ||
+      !isfinite(cfg->conf_water_flow) || cfg->conf_water_flow < 0.0f ||
+      cfg->conf_water_flow > 1.0f ||
+      !isfinite(cfg->conf_impact) || cfg->conf_impact < 0.0f ||
+      cfg->conf_impact > 1.0f ||
+      !isfinite(cfg->conf_distress) || cfg->conf_distress < 0.0f ||
+      cfg->conf_distress > 1.0f ||
+      !isfinite(cfg->conf_name_call) || cfg->conf_name_call < 0.0f ||
+      cfg->conf_name_call > 1.0f)
+    {
+      return vg_config_fail(reason, reason_len, "置信度阈值必须在 0~1");
+    }
+
+  if (cfg->alarm_hold_sec == 0 || cfg->water_notice_sec == 0 ||
+      cfg->water_warning_sec < cfg->water_notice_sec ||
+      cfg->warning_countdown_sec == 0 ||
+      cfg->event_idle_timeout_sec == 0 ||
+      cfg->snooze_max_count > 10 || cfg->upload_retry_sec == 0 ||
+      cfg->upload_retry_sec > 900 || cfg->upload_queue_max == 0 ||
+      cfg->upload_queue_max > 64)
+    {
+      return vg_config_fail(reason, reason_len, "阈值或队列配额越界");
+    }
+
+  if (reason != NULL && reason_len > 0)
+    {
+      reason[0] = '\0';
+    }
+  return 0;
+}
+
 int vg_config_load(const char *path)
 {
   vg_config_t *cfg = vg_config();
+  vg_config_t candidate = *cfg;
   char *buf;
   long size;
   FILE *fp;
   double d;
   int i;
+  int schema_version;
+  int config_revision;
 
   if (path == NULL)
     {
@@ -158,38 +313,59 @@ int vg_config_load(const char *path)
   buf[size] = '\0';
   fclose(fp);
 
-  vg_json_get_str(buf, "deviceId", cfg->device_id, sizeof(cfg->device_id));
-  vg_json_get_str(buf, "dataDir", cfg->data_dir, sizeof(cfg->data_dir));
-  vg_json_get_str(buf, "consoleHost", cfg->console_host,
-                  sizeof(cfg->console_host));
-  vg_json_get_str(buf, "consolePath", cfg->console_path,
-                  sizeof(cfg->console_path));
-  vg_json_get_str(buf, "webhookUrl", cfg->webhook_url,
-                  sizeof(cfg->webhook_url));
+  if (vg_json_get_int(buf, "schemaVersion", &schema_version) == 0 &&
+      schema_version >= 0)
+    {
+      candidate.schema_version = (uint32_t)schema_version;
+    }
+  if (vg_json_get_int(buf, "configRevision", &config_revision) == 0 &&
+      config_revision >= 0)
+    {
+      candidate.config_revision = (uint32_t)config_revision;
+    }
+  vg_json_get_str(buf, "configSignature", candidate.config_signature,
+                  sizeof(candidate.config_signature));
+  vg_json_get_str(buf, "deviceId", candidate.device_id,
+                  sizeof(candidate.device_id));
+  vg_json_get_str(buf, "dataDir", candidate.data_dir,
+                  sizeof(candidate.data_dir));
+  vg_json_get_str(buf, "consoleHost", candidate.console_host,
+                  sizeof(candidate.console_host));
+  vg_json_get_str(buf, "consolePath", candidate.console_path,
+                  sizeof(candidate.console_path));
+  vg_json_get_str(buf, "consoleServerName", candidate.console_server_name,
+                  sizeof(candidate.console_server_name));
+  vg_json_get_str(buf, "consoleCaPath", candidate.console_ca_path,
+                  sizeof(candidate.console_ca_path));
+  vg_json_get_str(buf, "deviceToken", candidate.device_token,
+                  sizeof(candidate.device_token));
+  vg_json_get_str(buf, "webhookUrl", candidate.webhook_url,
+                  sizeof(candidate.webhook_url));
 
   if (vg_json_get_int(buf, "consolePort", &i) == 0)
     {
-      cfg->console_port = i;
+      candidate.console_port = i;
     }
 
-  vg_json_get_bool(buf, "webhookEnabled", &cfg->webhook_enabled);
+  vg_json_get_bool(buf, "consoleTls", &candidate.console_tls);
+  vg_json_get_bool(buf, "webhookEnabled", &candidate.webhook_enabled);
 
-  if (vg_json_get_bool(buf, "demoMode", &cfg->demo_mode) == 0 &&
-      cfg->demo_mode)
+  if (vg_json_get_bool(buf, "demoMode", &candidate.demo_mode) == 0 &&
+      candidate.demo_mode)
     {
-      vg_config_apply_demo(cfg);
+      vg_config_apply_demo(&candidate);
     }
 
 #define VG_CFG_F(key, field)                        \
   if (vg_json_get_double(buf, key, &d) == 0)        \
     {                                               \
-      cfg->field = (float)d;                        \
+      candidate.field = (float)d;                   \
     }
 
 #define VG_CFG_U(key, field)                        \
   if (vg_json_get_int(buf, key, &i) == 0 && i >= 0) \
     {                                               \
-      cfg->field = (uint32_t)i;                     \
+      candidate.field = (uint32_t)i;                \
     }
 
   VG_CFG_F("confAlarmBeep", conf_alarm_beep)
@@ -214,6 +390,23 @@ int vg_config_load(const char *path)
 #undef VG_CFG_U
 
   free(buf);
+
+  if (candidate.console_server_name[0] == '\0')
+    {
+      vg_strlcpy(candidate.console_server_name, candidate.console_host,
+                 sizeof(candidate.console_server_name));
+    }
+
+  {
+    char reason[96];
+    if (vg_config_validate(&candidate, reason, sizeof(reason)) < 0)
+      {
+        fprintf(stderr, "[velaguard] 拒绝配置: %s\n", reason);
+        return -2;
+      }
+  }
+
+  *cfg = candidate;
   return 0;
 }
 
@@ -222,10 +415,15 @@ void vg_config_dump(void)
   vg_config_t *cfg = vg_config();
 
   printf("VelaGuard 配置:\n");
+  printf("  schema        : %u revision %" PRIu32 "\n",
+         (unsigned)cfg->schema_version, cfg->config_revision);
   printf("  deviceId      : %s\n", cfg->device_id);
   printf("  dataDir       : %s\n", cfg->data_dir);
   printf("  console       : %s:%d%s\n",
          cfg->console_host, cfg->console_port, cfg->console_path);
+  printf("  transport     : %s（服务端名称 %s）\n",
+         cfg->console_tls ? "TLS（需生产 transport）" : "HTTP 演示 profile",
+         cfg->console_server_name);
   printf("  webhook       : %s\n",
          cfg->webhook_enabled ? "已启用(地址不回显)" : "未启用");
   printf("  demoMode      : %s\n", cfg->demo_mode ? "是" : "否");

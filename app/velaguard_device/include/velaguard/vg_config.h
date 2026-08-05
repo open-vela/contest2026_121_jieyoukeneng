@@ -9,6 +9,7 @@
 #define __VELAGUARD_VG_CONFIG_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "velaguard/vg_types.h"
@@ -20,6 +21,8 @@ extern "C"
 
 #define VG_URL_LEN   128
 #define VG_PATH_LEN  96
+#define VG_TOKEN_LEN 96
+#define VG_SIGNATURE_LEN 128
 
 #ifdef CONFIG_VELAGUARD_DATA_DIR
 #  define VG_DEFAULT_DATA_DIR CONFIG_VELAGUARD_DATA_DIR
@@ -29,6 +32,12 @@ extern "C"
 
 typedef struct
 {
+  /* 配置协议与发布状态 */
+
+  uint32_t schema_version;
+  uint32_t config_revision;
+  char     config_signature[VG_SIGNATURE_LEN];
+
   /* 身份与存储 */
 
   char     device_id[VG_DEVICE_ID_LEN];
@@ -39,6 +48,10 @@ typedef struct
   char     console_host[VG_URL_LEN];
   int      console_port;
   char     console_path[VG_PATH_LEN];
+  bool     console_tls;
+  char     console_server_name[VG_URL_LEN];
+  char     console_ca_path[VG_PATH_LEN];
+  char     device_token[VG_TOKEN_LEN];
 
   /* 可选扩展：webhook 转发，失败不影响主通道 */
 
@@ -86,6 +99,10 @@ void vg_config_defaults(vg_config_t *cfg);
 /* 从 JSON 文件载入并覆盖默认值。文件不存在返回 -1（使用默认值继续运行）。 */
 
 int vg_config_load(const char *path);
+
+/* 对候选配置执行类型、范围和跨字段校验，不修改当前配置。 */
+
+int vg_config_validate(const vg_config_t *cfg, char *reason, size_t reason_len);
 
 /* 应用演示模式的缩短阈值（PRD-03：正式阈值 3 分钟，演示构建缩短） */
 

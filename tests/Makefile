@@ -32,6 +32,7 @@ SRCS := \
   $(APP_DIR)/audio_detector/vg_detector.c \
   $(APP_DIR)/enrollment/vg_enroll.c \
   $(APP_DIR)/uploader/vg_http.c \
+  $(APP_DIR)/uploader/vg_transport.c \
   $(APP_DIR)/uploader/vg_notifier.c \
   $(APP_DIR)/uploader/vg_agent.c \
   $(APP_DIR)/uploader/vg_uploader.c \

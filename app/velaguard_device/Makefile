@@ -26,6 +26,7 @@ CSRCS += audio_detector/vg_capture.c
 CSRCS += audio_detector/vg_detector.c
 CSRCS += enrollment/vg_enroll.c
 CSRCS += uploader/vg_http.c
+CSRCS += uploader/vg_transport.c
 CSRCS += uploader/vg_notifier.c
 CSRCS += uploader/vg_agent.c
 CSRCS += uploader/vg_uploader.c

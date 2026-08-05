@@ -21,12 +21,21 @@ extern "C"
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define VG_EVENT_ID_LEN     24
+#define VG_EVENT_ID_LEN     40
 #define VG_DEVICE_ID_LEN    32
+#define VG_MESSAGE_ID_LEN   48
+#define VG_DEVICE_EPOCH_LEN 40
+#define VG_TRACE_ID_LEN     48
 #define VG_PHRASE_LEN       32
 #define VG_LABEL_LEN        24
 #define VG_SUMMARY_LEN      128
 #define VG_TIMESTR_LEN      32
+#define VG_ADVICE_LEN       256
+
+#define VG_PROTOCOL_NAME    "velaguard"
+#define VG_EVENT_SCHEMA     "event.v1"
+#define VG_EVENT_MESSAGE    "event.upsert"
+#define VG_ACK_SCHEMA        "ack.v1"
 
 /* 本地事件日志容量：PRD-05 规定最多 100 条，写满环形覆盖 */
 
@@ -153,6 +162,7 @@ typedef struct
 {
   char               event_id[VG_EVENT_ID_LEN];
   char               device_id[VG_DEVICE_ID_LEN];
+  uint32_t           event_revision; /* 生命周期内从 1 开始单调增加 */
   vg_event_type_t    type;
   vg_level_t         level;
   float              confidence;
@@ -172,6 +182,27 @@ typedef struct
 
   char               summary[VG_SUMMARY_LEN];
 } vg_safety_event_t;
+
+/* event.v1 外层 envelope。payload 仍使用上面的结构化事件内容，外层字段
+ * 负责版本、顺序、幂等和跨设备追踪。原始音频、转写和完整对话不在此结构中。 */
+
+typedef struct
+{
+  char               protocol[16];
+  char               schema[24];
+  char               message_type[32];
+  char               message_id[VG_MESSAGE_ID_LEN];
+  char               device_id[VG_DEVICE_ID_LEN];
+  char               device_epoch[VG_DEVICE_EPOCH_LEN];
+  uint64_t           device_seq;
+  char               event_id[VG_EVENT_ID_LEN];
+  uint32_t           event_revision;
+  int64_t            sent_at;
+  uint64_t           monotonic_ms;
+  char               trace_id[VG_TRACE_ID_LEN];
+  vg_safety_event_t  event;
+  char               advice[VG_ADVICE_LEN];
+} vg_event_envelope_t;
 
 /****************************************************************************
  * Public Function Prototypes
@@ -228,6 +259,23 @@ int vg_event_from_json(const char *json, vg_safety_event_t *evt);
 /* 事件字段合法性校验，返回 0 合法，负值为第一个非法字段编号 */
 
 int vg_event_validate(const vg_safety_event_t *evt);
+
+/* event.v1 envelope 序列化、解析与校验。 */
+
+int vg_event_envelope_to_json(const vg_safety_event_t *evt,
+                              const char *advice,
+                              const char *message_id,
+                              const char *device_epoch,
+                              uint64_t device_seq,
+                              uint32_t event_revision,
+                              const char *trace_id,
+                              uint64_t monotonic_ms,
+                              char *buf, size_t len);
+
+int vg_event_envelope_from_json(const char *json,
+                                vg_event_envelope_t *envelope);
+
+int vg_event_envelope_validate(const vg_event_envelope_t *envelope);
 
 #ifdef __cplusplus
 }

@@ -61,7 +61,7 @@ curl -X POST -H 'Content-Type: application/json' \
 | Agent/LLM 全挂 | 删掉 Skill 目录 → 事件照样推送，文案自动回落到端侧模板 |
 | 时钟不可信 | `velaguard time unsync` → `velaguard sim impact` → 夜间加严规则不生效，卡片标注「设备时间未同步」 |
 | 真实识别链路 | `velaguard feed water_flow.wav`（wav 需先推到设备 `/data`） |
-| 一键跑完全部验收 | `velaguard selftest`（24 项断言，约 20 秒） |
+| 一键跑完全部验收 | `velaguard selftest`（25 项断言，约 20 秒） |
 
 ## 纯控制台演示（设备完全不可用时的兜底）
 
@@ -78,4 +78,4 @@ node inject_events.js --scenario 5 # 只演"急促呼喊升级"
 
 - 官方限 5 分钟：主线按 3 分钟设计，留 1.5 分钟讲复现步骤与 AI Coding 亮点。
 - 手机画面建议用投屏或分屏录制，让"设备响 → 手机弹卡片"的因果关系一眼可见。
-- 演示前跑一次 `cd tests && make test`，确保环境干净（18 项全绿再开录）。
+- 演示前跑一次 `cd tests && make test`，确保环境干净（21 项全绿再开录）。

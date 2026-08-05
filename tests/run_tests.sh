@@ -5,7 +5,7 @@
 #   cd tests && make test
 #
 # 覆盖内容：
-#   1. 端侧内置验收自检（PRD-08 可自动化场景，24 项断言）
+#   1. 端侧内置验收自检（PRD-08 可自动化场景，25 项断言）
 #   2. 端侧 C 特征实现 与 训练脚本 Python 特征实现 的逐维一致性
 #   3. 真实识别链路（wav -> 特征 -> int8 推理 -> 观测 -> 状态机 -> 事件）
 #   4. 事件日志断电重启不丢失 + 100 条环形覆盖
@@ -152,14 +152,43 @@ if command -v node > /dev/null 2>&1; then
     bad "幂等失败：evt_test 出现 $CNT 次"
   fi
 
-  # 5.3 家属侧回写状态
+  # 5.3 家属侧动作只创建命令，不直接改变设备事件状态
   if curlx -sf -X PATCH -H 'Content-Type: application/json' \
-       -d '{"localStatus":"handled"}' \
+       -d '{"localStatus":"handled","desiredRevision":1}' \
        "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/events/evt_test" \
-       | grep -q '"localStatus":"handled"'; then
-    ok "家属侧可回写处理状态"
+       | grep -q '"requested":true'; then
+    ok "家属侧动作进入待执行命令"
   else
-    bad "家属侧状态回写失败"
+    bad "家属侧命令创建失败"
+  fi
+
+  COMMAND_ID=$(curlx -sf \
+    "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/v1/devices/velaguard_test/commands" \
+    | sed -n 's/.*"commandId":"\([A-Za-z0-9_.-]*\)".*/\1/p' | head -1)
+  if [ -n "$COMMAND_ID" ]; then
+    ok "设备可主动拉取待执行命令"
+  else
+    bad "设备命令拉取失败"
+  fi
+
+  if [ -n "$COMMAND_ID" ] && curlx -sf -X POST \
+       -H 'Content-Type: application/json' \
+       -d "{\"commandId\":\"$COMMAND_ID\",\"messageId\":\"receipt_msg_1\"}" \
+       "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/v1/devices/velaguard_test/command-receipts" \
+       | grep -q '"messageType":"commandReceiptAck"'; then
+    ok "设备持久化命令接收回执并返回 ACK"
+  else
+    bad "设备命令接收回执 ACK 失败"
+  fi
+
+  if [ -n "$COMMAND_ID" ] && curlx -sf -X POST \
+       -H 'Content-Type: application/json' \
+       -d "{\"commandId\":\"$COMMAND_ID\",\"messageId\":\"result_msg_1\",\"status\":\"requires_local_confirmation\",\"resultRevision\":1}" \
+       "http://127.0.0.1:$VELAGUARD_CONSOLE_PORT/v1/devices/velaguard_test/command-results" \
+       | grep -q '"messageType":"commandResultIngressAck"'; then
+    ok "设备命令结果持久化并返回接入 ACK"
+  else
+    bad "设备命令结果 ACK 失败"
   fi
 
   # 5.4 隐私红线：带原始音频/对话文本字段的负载必须被拒绝

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velaguard.local/protocol/ack.v1.schema.json",
+  "title": "VelaGuard ack.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "messageType", "messageId", "deviceId", "accepted",
+    "duplicate", "serverTime"
+  ],
+  "properties": {
+    "schema": { "const": "ack.v1" },
+    "messageType": {
+      "enum": ["eventIngressAck", "commandResultIngressAck",
+               "commandReceiptAck"]
+    },
+    "messageId": {
+      "type": "string", "minLength": 1, "maxLength": 96,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "deviceId": {
+      "type": "string", "minLength": 1, "maxLength": 32,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "eventId": {
+      "type": "string", "maxLength": 40,
+      "pattern": "^[A-Za-z0-9_.-]*$"
+    },
+    "eventRevision": { "type": "integer", "minimum": 1 },
+    "commandId": {
+      "type": "string", "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.-]*$"
+    },
+    "accepted": { "type": "boolean" },
+    "duplicate": { "type": "boolean" },
+    "serverTime": { "type": "string", "format": "date-time" },
+    "traceId": {
+      "type": "string", "maxLength": 96,
+      "pattern": "^[A-Za-z0-9_.-]*$"
+    },
+    "errorCode": { "type": ["string", "null"], "maxLength": 64 }
+  }
+}
