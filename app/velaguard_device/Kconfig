@@ -71,4 +71,11 @@ config VELAGUARD_UI_LVGL
 		在板载 LCD 上显示监测首页 / 事件确认页 / 历史记录页。
 		关闭时仍可通过 velaguard ui 命令查看完全相同的页面内容。
 
+config VELAGUARD_UI_STACKSIZE
+	int "LVGL 界面线程栈大小"
+	default 40960
+	depends on VELAGUARD_UI_LVGL
+	---help---
+		LVGL 初始化和 LCD 刷新需要比普通守护任务更大的线程栈。
+
 endif

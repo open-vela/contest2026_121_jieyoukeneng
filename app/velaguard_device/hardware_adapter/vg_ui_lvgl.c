@@ -139,17 +139,24 @@ static void *vg_lvgl_thread(void *arg)
 
 int vg_ui_lvgl_start(void)
 {
+  pthread_attr_t attr;
+
   if (g_running)
     {
       return 0;
     }
 
   g_running = true;
-  if (pthread_create(&g_thread, NULL, vg_lvgl_thread, NULL) != 0)
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, CONFIG_VELAGUARD_UI_STACKSIZE);
+  if (pthread_create(&g_thread, &attr, vg_lvgl_thread, NULL) != 0)
     {
       g_running = false;
+      pthread_attr_destroy(&attr);
       return -1;
     }
+
+  pthread_attr_destroy(&attr);
 
   return 0;
 }
