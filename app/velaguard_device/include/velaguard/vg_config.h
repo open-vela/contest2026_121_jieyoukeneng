@@ -51,6 +51,8 @@ typedef struct
   bool     console_tls;
   char     console_server_name[VG_URL_LEN];
   char     console_ca_path[VG_PATH_LEN];
+  char     device_cert_path[VG_PATH_LEN];
+  char     device_key_path[VG_PATH_LEN];
   char     device_token[VG_TOKEN_LEN];
 
   /* 可选扩展：webhook 转发，失败不影响主通道 */

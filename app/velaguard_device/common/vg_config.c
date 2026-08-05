@@ -231,6 +231,13 @@ int vg_config_validate(const vg_config_t *cfg, char *reason,
                             "生产 profile 缺少设备认证令牌");
     }
 
+  if (!cfg->demo_mode && (cfg->device_cert_path[0] == '\0' ||
+                          cfg->device_key_path[0] == '\0'))
+    {
+      return vg_config_fail(reason, reason_len,
+                            "生产 profile 缺少 mTLS 客户端证书或私钥");
+    }
+
   if (!cfg->demo_mode && cfg->config_signature[0] == '\0')
     {
       return vg_config_fail(reason, reason_len,
@@ -337,6 +344,10 @@ int vg_config_load(const char *path)
                   sizeof(candidate.console_server_name));
   vg_json_get_str(buf, "consoleCaPath", candidate.console_ca_path,
                   sizeof(candidate.console_ca_path));
+  vg_json_get_str(buf, "deviceCertPath", candidate.device_cert_path,
+                  sizeof(candidate.device_cert_path));
+  vg_json_get_str(buf, "deviceKeyPath", candidate.device_key_path,
+                  sizeof(candidate.device_key_path));
   vg_json_get_str(buf, "deviceToken", candidate.device_token,
                   sizeof(candidate.device_token));
   vg_json_get_str(buf, "webhookUrl", candidate.webhook_url,
@@ -422,7 +433,7 @@ void vg_config_dump(void)
   printf("  console       : %s:%d%s\n",
          cfg->console_host, cfg->console_port, cfg->console_path);
   printf("  transport     : %s（服务端名称 %s）\n",
-         cfg->console_tls ? "TLS（需生产 transport）" : "HTTP 演示 profile",
+         cfg->console_tls ? "TLS（libcurl + mbedTLS）" : "HTTP 演示 profile",
          cfg->console_server_name);
   printf("  webhook       : %s\n",
          cfg->webhook_enabled ? "已启用(地址不回显)" : "未启用");

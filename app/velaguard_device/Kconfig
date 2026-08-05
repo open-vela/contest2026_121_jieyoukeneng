@@ -53,6 +53,15 @@ config VELAGUARD_BUTTON_DEVICE
 config VELAGUARD_TONE_DIR
 	string "分级提示音资源目录"
 	default "/data/velaguard/tones"
+	---help---
+		兼容旧版资源配置。当前 Gemini-S1 使用 NxPlayer 在线生成提示音，
+		不要求把 WAV 文件写入数据分区。
+
+config VELAGUARD_AUDIO_OUT_DEVICE
+	string "扬声器 PCM 播放设备"
+	default "/dev/audio/pcm0p"
+	---help---
+		openvela NxPlayer 使用的板载扬声器 PCM 设备。
 
 config VELAGUARD_UI_LVGL
 	bool "启用 LVGL LCD 界面"

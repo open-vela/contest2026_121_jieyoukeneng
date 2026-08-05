@@ -21,11 +21,13 @@
   "consoleTls": false,
   "consoleServerName": "192.168.43.1",
   "consoleCaPath": "",
+  "deviceCertPath": "",
+  "deviceKeyPath": "",
   "deviceToken": "",
 
   "_productionGate": [
-    "当前仓库的 demo transport 只支持明文 HTTP；consoleTls=true 会拒绝发送，",
-    "接入官方 TLS/mTLS、证书校验、密钥存储和配置签名验证后才可开放生产 profile。"
+    "Gemini-S1 的 consoleTls=true 使用板端 libcurl + mbedTLS，并校验 CA、",
+    "服务端名称和可选客户端证书；生产 profile 仍需安全存储、配置签名和实板验收。"
   ],
 
   "_webhook": "可选扩展通道，失败不影响主通道。真实地址不要写进仓库。",
