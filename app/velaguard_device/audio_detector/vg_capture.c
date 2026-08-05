@@ -103,7 +103,8 @@ static int vg_wav_parse(FILE *fp, vg_wav_info_t *info)
         }
     }
 
-  if (info->data_off == 0 || info->channels == 0 || info->rate == 0)
+  if (info->data_off == 0 || info->channels == 0 || info->rate == 0 ||
+      info->channels > 8)
     {
       return -1;
     }
@@ -132,14 +133,14 @@ static int vg_wav_read(int16_t *buf, size_t nsamples)
 
       double ratio = (double)g_wav_info.rate / (double)VG_SAMPLE_RATE;
       long src_index = (long)((double)g_wav_pos * ratio);
-      long byte_off = g_wav_info.data_off +
-                      src_index * 2 * (long)g_wav_info.channels;
+      int64_t byte_off = (int64_t)g_wav_info.data_off +
+                         (int64_t)src_index * 2 * (int64_t)g_wav_info.channels;
       size_t framebytes = 2 * (size_t)g_wav_info.channels;
       int32_t acc = 0;
       int c;
 
-      if (byte_off + (long)framebytes >
-          g_wav_info.data_off + g_wav_info.data_len)
+      if (byte_off + (int64_t)framebytes >
+          (int64_t)g_wav_info.data_off + g_wav_info.data_len)
         {
           break;
         }

@@ -84,6 +84,10 @@ static void *vg_lvgl_thread(void *arg)
   lv_nuttx_dsc_init(&info);
   lv_nuttx_init(&info, &g_result);
 
+  /* 必要延时，影响初始化顺序（Gemini-S1 板级踩坑，无此延时 display 不上屏） */
+
+  usleep(100000);
+
   if (g_result.disp == NULL)
     {
       printf("[velaguard] LVGL 显示初始化失败，UI 降级为控制台输出\n");

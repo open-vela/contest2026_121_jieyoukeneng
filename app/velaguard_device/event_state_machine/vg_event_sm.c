@@ -3,6 +3,7 @@
  ****************************************************************************/
 
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +48,12 @@ static vg_track_t g_tracks[VG_EVT_TYPE_MAX];
 static vg_sm_cb_t g_cb;
 static uint32_t   g_seq;
 static bool       g_inited;
+
+/* 保护 g_tracks[] 的并发访问：守护线程 feed/tick 与 NSH 命令 sim/ack/top 并发。
+ * 使用递归锁，因为 vg_sm_init 内部调用 vg_sm_set_callbacks 会重入。
+ */
+
+static pthread_mutex_t g_sm_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
 /****************************************************************************
  * Private Functions
@@ -345,6 +352,7 @@ static void vg_rule_name_call(vg_track_t *t)
 
 void vg_sm_set_callbacks(const vg_sm_cb_t *cb)
 {
+  pthread_mutex_lock(&g_sm_lock);
   memset(&g_cb, 0, sizeof(g_cb));
   if (cb != NULL)
     {
@@ -352,19 +360,24 @@ void vg_sm_set_callbacks(const vg_sm_cb_t *cb)
     }
 
   g_inited = true;
+  pthread_mutex_unlock(&g_sm_lock);
 }
 
 void vg_sm_init(const vg_sm_cb_t *cb)
 {
+  pthread_mutex_lock(&g_sm_lock);
   vg_sm_set_callbacks(cb);
   memset(g_tracks, 0, sizeof(g_tracks));
   g_seq = vg_event_log_total();
+  pthread_mutex_unlock(&g_sm_lock);
 }
 
 void vg_sm_reset(void)
 {
+  pthread_mutex_lock(&g_sm_lock);
   memset(g_tracks, 0, sizeof(g_tracks));
   g_seq = vg_event_log_total();
+  pthread_mutex_unlock(&g_sm_lock);
 }
 
 void vg_sm_feed_sound(const vg_sound_obs_t *obs)
@@ -379,6 +392,8 @@ void vg_sm_feed_sound(const vg_sound_obs_t *obs)
     {
       return;
     }
+
+  pthread_mutex_lock(&g_sm_lock);
 
   switch (obs->cls)
     {
@@ -398,11 +413,13 @@ void vg_sm_feed_sound(const vg_sound_obs_t *obs)
         break;
 
       default:
+        pthread_mutex_unlock(&g_sm_lock);
         return;
     }
 
   if (obs->confidence < threshold)
     {
+      pthread_mutex_unlock(&g_sm_lock);
       return;
     }
 
@@ -417,6 +434,7 @@ void vg_sm_feed_sound(const vg_sound_obs_t *obs)
           now - t->state_since_ms <
               (uint64_t)cfg->event_idle_timeout_sec * 1000)
         {
+          pthread_mutex_unlock(&g_sm_lock);
           return;
         }
 
@@ -455,6 +473,7 @@ void vg_sm_feed_sound(const vg_sound_obs_t *obs)
     {
       /* snooze 期间继续统计，但不重新提醒 */
 
+      pthread_mutex_unlock(&g_sm_lock);
       return;
     }
 
@@ -475,6 +494,8 @@ void vg_sm_feed_sound(const vg_sound_obs_t *obs)
       default:
         break;
     }
+
+  pthread_mutex_unlock(&g_sm_lock);
 }
 
 void vg_sm_feed_distress(const vg_distress_obs_t *obs)
@@ -491,6 +512,8 @@ void vg_sm_feed_distress(const vg_distress_obs_t *obs)
       return;
     }
 
+  pthread_mutex_lock(&g_sm_lock);
+
   if (obs->kind == VG_VOICE_NAME_CALL || obs->kind == VG_VOICE_HELP_PHRASE)
     {
       type = VG_EVT_NAME_CALL_HELP;
@@ -504,6 +527,7 @@ void vg_sm_feed_distress(const vg_distress_obs_t *obs)
 
   if (obs->confidence < threshold)
     {
+      pthread_mutex_unlock(&g_sm_lock);
       return;
     }
 
@@ -516,6 +540,7 @@ void vg_sm_feed_distress(const vg_distress_obs_t *obs)
           now - t->state_since_ms <
               (uint64_t)cfg->event_idle_timeout_sec * 1000)
         {
+          pthread_mutex_unlock(&g_sm_lock);
           return;
         }
 
@@ -579,6 +604,7 @@ void vg_sm_feed_distress(const vg_distress_obs_t *obs)
 
   if (t->state == VG_STATE_SNOOZED)
     {
+      pthread_mutex_unlock(&g_sm_lock);
       return;
     }
 
@@ -590,6 +616,8 @@ void vg_sm_feed_distress(const vg_distress_obs_t *obs)
     {
       vg_rule_distress(t);
     }
+
+  pthread_mutex_unlock(&g_sm_lock);
 }
 
 void vg_sm_tick(void)
@@ -602,6 +630,8 @@ void vg_sm_tick(void)
     {
       return;
     }
+
+  pthread_mutex_lock(&g_sm_lock);
 
   for (i = 0; i < VG_EVT_TYPE_MAX; i++)
     {
@@ -697,6 +727,8 @@ void vg_sm_tick(void)
             break;
         }
     }
+
+  pthread_mutex_unlock(&g_sm_lock);
 }
 
 int vg_sm_ack(const char *event_id, vg_local_status_t action)
@@ -704,6 +736,7 @@ int vg_sm_ack(const char *event_id, vg_local_status_t action)
   vg_config_t *cfg = vg_config();
   vg_track_t *t = NULL;
   uint64_t now = vg_now_ms();
+  int ret = -1;
   int i;
 
   if (event_id == NULL || event_id[0] == '\0')
@@ -718,6 +751,8 @@ int vg_sm_ack(const char *event_id, vg_local_status_t action)
       event_id = view.evt.event_id;
     }
 
+  pthread_mutex_lock(&g_sm_lock);
+
   for (i = 0; i < VG_EVT_TYPE_MAX; i++)
     {
       if (g_tracks[i].active && g_tracks[i].materialized &&
@@ -730,6 +765,7 @@ int vg_sm_ack(const char *event_id, vg_local_status_t action)
 
   if (t == NULL)
     {
+      pthread_mutex_unlock(&g_sm_lock);
       return -1;
     }
 
@@ -737,35 +773,42 @@ int vg_sm_ack(const char *event_id, vg_local_status_t action)
     {
       case VG_STATUS_HANDLED:
       case VG_STATUS_FALSE_ALARM:
-        /* 用户确认后停止升级；若已发出通知则同步一条最终状态 */
-
         vg_track_close(t, action);
-        return 0;
+        ret = 0;
+        break;
 
       case VG_STATUS_SNOOZED:
         if (t->snooze_count >= cfg->snooze_max_count)
           {
-            return -2;
+            ret = -2;
           }
-
-        t->snooze_count++;
-        t->state = VG_STATE_SNOOZED;
-        t->state_since_ms = now;
-        t->snooze_deadline_ms =
-            now + (uint64_t)cfg->snooze_minutes * 60 * 1000;
-        t->evt.local_status = VG_STATUS_SNOOZED;
-        vg_notify_changed(t);
-        return 0;
+        else
+          {
+            t->snooze_count++;
+            t->state = VG_STATE_SNOOZED;
+            t->state_since_ms = now;
+            t->snooze_deadline_ms =
+                now + (uint64_t)cfg->snooze_minutes * 60 * 1000;
+            t->evt.local_status = VG_STATUS_SNOOZED;
+            vg_notify_changed(t);
+            ret = 0;
+          }
+        break;
 
       default:
-        return -1;
+        break;
     }
+
+  pthread_mutex_unlock(&g_sm_lock);
+  return ret;
 }
 
 int vg_sm_active_count(void)
 {
   int n = 0;
   int i;
+
+  pthread_mutex_lock(&g_sm_lock);
 
   for (i = 0; i < VG_EVT_TYPE_MAX; i++)
     {
@@ -775,6 +818,7 @@ int vg_sm_active_count(void)
         }
     }
 
+  pthread_mutex_unlock(&g_sm_lock);
   return n;
 }
 
@@ -813,6 +857,8 @@ int vg_sm_get(int idx, vg_track_view_t *out)
       return -1;
     }
 
+  pthread_mutex_lock(&g_sm_lock);
+
   for (i = 0; i < VG_EVT_TYPE_MAX; i++)
     {
       if (g_tracks[i].active && g_tracks[i].materialized)
@@ -823,6 +869,7 @@ int vg_sm_get(int idx, vg_track_view_t *out)
 
   if (idx >= n)
     {
+      pthread_mutex_unlock(&g_sm_lock);
       return -1;
     }
 
@@ -843,6 +890,7 @@ int vg_sm_get(int idx, vg_track_view_t *out)
     }
 
   vg_fill_view(sorted[idx], out);
+  pthread_mutex_unlock(&g_sm_lock);
   return 0;
 }
 

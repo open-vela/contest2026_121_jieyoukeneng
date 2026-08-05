@@ -25,6 +25,7 @@
 /* 匹配判定：距离小于半径即命中，score 由距离线性映射 */
 
 #define VG_MATCH_MARGIN 1.25f
+#define VG_PERSON_SEEN_MAX 16 /* >= g_preset_person 元素数，预留扩展空间 */
 
 /****************************************************************************
  * Private Data
@@ -487,7 +488,7 @@ int vg_enroll_match(const float *feat, vg_enroll_match_t *out)
 
 bool vg_enroll_min_set_ready(char *why, size_t len)
 {
-  bool person_seen[8] = { false };
+  bool person_seen[VG_PERSON_SEEN_MAX] = { false };
   int persons = 0;
   int names = 0;
   int helps = 0;
@@ -506,7 +507,7 @@ bool vg_enroll_min_set_ready(char *why, size_t len)
           continue;
         }
 
-      for (j = 0; j < vg_enroll_preset_person_count() && j < 8; j++)
+      for (j = 0; j < vg_enroll_preset_person_count() && j < VG_PERSON_SEEN_MAX; j++)
         {
           if (strcmp(t->person, vg_enroll_preset_person(j)) == 0 &&
               !person_seen[j])
