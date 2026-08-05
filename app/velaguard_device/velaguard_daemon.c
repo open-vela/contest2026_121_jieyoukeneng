@@ -208,15 +208,48 @@ int vg_daemon_init(void)
     }
 
   vg_time_init();
-  vg_event_log_init(NULL);
-  vg_enroll_init(NULL);
+
+  if (vg_event_log_init(NULL) < 0)
+    {
+      goto err_event_log;
+    }
+
+  if (vg_enroll_init(NULL) < 0)
+    {
+      goto err_enroll;
+    }
+
   vg_notifier_init();
-  vg_agent_init();
-  vg_uploader_init();
-  vg_detector_init();
-  vg_indicator_init();
-  vg_input_init();
-  vg_ui_init();
+
+  if (vg_agent_init() < 0)
+    {
+      goto err_agent;
+    }
+
+  if (vg_uploader_init() < 0)
+    {
+      goto err_uploader;
+    }
+
+  if (vg_detector_init() < 0)
+    {
+      goto err_detector;
+    }
+
+  if (vg_indicator_init() < 0)
+    {
+      goto err_indicator;
+    }
+
+  if (vg_input_init() < 0)
+    {
+      goto err_input;
+    }
+
+  if (vg_ui_init() < 0)
+    {
+      goto err_ui;
+    }
 
   memset(&cb, 0, sizeof(cb));
   cb.on_event_changed = vg_on_event_changed;
@@ -245,6 +278,24 @@ int vg_daemon_init(void)
 
   g_inited = true;
   return 0;
+
+  /* 失败时按初始化逆序回滚（vg_agent/vg_notifier 使用静态缓冲区无需 deinit） */
+
+err_ui:
+  vg_input_deinit();
+err_input:
+  vg_indicator_deinit();
+err_indicator:
+  vg_detector_deinit();
+err_detector:
+  vg_uploader_deinit();
+err_uploader:
+err_agent:
+  vg_enroll_deinit();
+err_enroll:
+  vg_event_log_deinit();
+err_event_log:
+  return -1;
 }
 
 void vg_daemon_deinit(void)
@@ -332,6 +383,7 @@ int vg_daemon_start(vg_source_t src, const char *path)
                   CONFIG_VELAGUARD_STACKSIZE, vg_daemon_task, NULL) < 0)
     {
       g_running = false;
+      vg_daemon_deinit();
       printf("[velaguard] 守护任务创建失败\n");
       return -1;
     }
@@ -339,11 +391,10 @@ int vg_daemon_start(vg_source_t src, const char *path)
   if (pthread_create(&g_thread, NULL, vg_daemon_thread, NULL) != 0)
     {
       g_running = false;
+      vg_daemon_deinit();
       printf("[velaguard] 守护任务创建失败\n");
       return -1;
     }
-
-  pthread_detach(g_thread);
 #endif
 
   return 0;
@@ -357,7 +408,17 @@ int vg_daemon_stop(void)
     }
 
   g_running = false;
+
+#ifdef __NuttX__
+  /* NuttX task_create 无法 join，等待守护循环自行退出 */
+
   usleep(VG_TICK_MS * 2000);
+#else
+  /* POSIX 路径：join 等待线程真正结束，避免 deinit 时 fd 被仍在运行的线程使用 */
+
+  pthread_join(g_thread, NULL);
+#endif
+
   return 0;
 }
 

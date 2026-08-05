@@ -387,6 +387,7 @@ int vg_feature_extract(const int16_t *pcm, size_t nsamples, float *feat)
 
   /* ---- v2 追加维度（40-52），与 extract_v2() 逐维一致 ---- */
 
+  if (nframes > 0)
     {
       float e_mean = 0.0f;
       float e_max;
