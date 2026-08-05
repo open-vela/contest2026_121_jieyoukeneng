@@ -17,7 +17,12 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
+
+#ifdef __NuttX__
+#  include <nuttx/sched.h>
+#endif
 
 #include <lvgl/lvgl.h>
 
@@ -30,6 +35,7 @@
  ****************************************************************************/
 
 static pthread_t         g_thread;
+static pid_t             g_task;
 static volatile bool     g_running;
 static lv_obj_t         *g_label;
 static lv_obj_t         *g_bar;
@@ -139,6 +145,17 @@ static void *vg_lvgl_thread(void *arg)
   return NULL;
 }
 
+#ifdef __NuttX__
+static int vg_lvgl_task(int argc, char *argv[])
+{
+  (void)argc;
+  (void)argv;
+
+  vg_lvgl_thread(NULL);
+  return 0;
+}
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -171,7 +188,13 @@ int vg_ui_lvgl_start(void)
       return -1;
     }
 
+#ifdef __NuttX__
+  g_task = task_create("velaguard_ui", CONFIG_VELAGUARD_PRIORITY,
+                       CONFIG_VELAGUARD_UI_STACKSIZE, vg_lvgl_task, NULL);
+  ret = g_task < 0 ? errno : 0;
+#else
   ret = pthread_create(&g_thread, &attr, vg_lvgl_thread, NULL);
+#endif
   if (ret != 0)
     {
       printf("[velaguard] LVGL线程创建失败: %d (%s)\n",
@@ -194,7 +217,12 @@ void vg_ui_lvgl_stop(void)
     }
 
   g_running = false;
+#ifdef __NuttX__
+  /* NuttX task has no pthread_join; let its loop observe the stop flag. */
+  usleep(200000);
+#else
   pthread_join(g_thread, NULL);
+#endif
 }
 
 bool vg_ui_lvgl_running(void)
