@@ -82,6 +82,11 @@ static void *vg_lvgl_thread(void *arg)
 
   lv_init();
   lv_nuttx_dsc_init(&info);
+#ifdef CONFIG_LV_USE_NUTTX_LCD
+  /* Gemini-S1 exposes the ILI9341 through NuttX's LCD device. */
+  info.fb_path = "/dev/lcd0";
+#endif
+
   lv_nuttx_init(&info, &g_result);
 
   /* 必要延时，影响初始化顺序（Gemini-S1 板级踩坑，无此延时 display 不上屏） */
