@@ -6,7 +6,7 @@
 > 每个用例给出：操作 → **预期结果** → 判定标准。预期结果里带具体数字的，
 > 都是本仓已实测过的值，可直接对照。
 >
-> 自动化部分见 `tests/run_tests.sh`（18 项）与 `velaguard selftest`（24 项）；
+> 自动化部分见 `tests/run_tests.sh`（21 项，环境完整时）与 `velaguard selftest`（25 项）；
 > 本手册覆盖的是**自动化测不了或需要人眼确认**的部分。
 
 ---
@@ -55,11 +55,11 @@ echo "CONFIG_LVX_USE_DEMO_CONTEST2026_121_VELAGUARD=y" \
 | # | 操作 | 预期结果 | 判定 |
 |---|---|---|---|
 | A1.1 | `velaguard` | 打印中文用法说明，含 start/sim/ack/ui/log/feed/enroll/selftest/bench | ☐ |
-| A1.2 | `velaguard selftest` | 逐场景打印，结尾 `==== 自检结果: 通过 24 项，失败 0 项 ====` | ☐ |
-| A1.3 | `velaguard status` | 打印运行状态；「模型」行显示 `MFCC(40)+MLP int8 | 版本 ... | 训练集 real:datasets+synth60 | 权重 4512 字节` | ☐ |
+| A1.2 | `velaguard selftest` | 逐场景打印，结尾 `==== 自检结果: 通过 25 项，失败 0 项 ====` | ☐ |
+| A1.3 | `velaguard status` | 打印运行状态；「模型」行显示 `MFCC(53)+MLP int8 | 版本 20260802 | 训练集 real:datasets+synth60+featv2 | 权重 5688 字节` | ☐ |
 | A1.4 | `velaguard config` | 打印配置，**不出现任何密码/密钥/webhook 地址** | ☐ |
 
-A1.2 是最关键的一条：24 项断言覆盖了 PRD-08 十项验收场景里可自动化的全部内容。
+A1.2 是最关键的一条：25 项断言覆盖了 PRD-08 十项验收场景里可自动化的全部内容。
 **任何一项失败都不要继续往下测**，先看失败项的说明。
 
 ---
@@ -204,12 +204,20 @@ velaguard status
 | A4.2 | 浏览器页面**自动弹出**卡片（无需刷新），含类型/等级/时间/持续/置信度/建议动作 | ☐ |
 | A4.3 | 卡片左侧色条与等级一致（提醒绿 / 警告黄 / 紧急红） | ☐ |
 | A4.4 | 紧急卡片有提示音（需浏览器允许音频）与呼吸高亮 | ☐ |
-| A4.5 | 点卡片上「已联系/已处理」，状态标签变为「已处理」 | ☐ |
+| A4.5 | 点卡片上「已联系/已处理」，显示「已请求设备执行」；设备回执 `received` 后再显示最终结果 | ☐ |
 | A4.6 | A2.5 的平静喊名事件**没有出现在页面上** | ☐ |
 
 > 如果模拟器网络不通（A4.1 显示离线），**不影响其余用例**——
 > 这正是设计要证明的"端侧不依赖网络"。此时可改用宿主机版
 > `tests/build/velaguard` 做 A4，效果等价（见 `tests/README.md`）。
+
+家属侧动作必须经过命令服务：浏览器只提交命令请求，设备通过轮询取得
+`command.v1`，校验目标、有效期、签名和本地确认条件后，先提交
+`commandReceipt`，再提交 `commandResult`。紧急事件的「已处理/误报」在设备本地确认
+前只能显示「待本地确认」，紧急事件禁止远程 `snooze`。
+
+演示配置可以使用 `consoleTls:false` 的局域网 HTTP；生产配置必须启用 TLS/mTLS、
+设备认证和命令签名。当前固件在 TLS 能力未接入前会拒绝 `consoleTls:true`，绝不回退到明文。
 
 ### A4.7 断网补发幂等
 
@@ -444,7 +452,7 @@ bash packages/ai_agent/fix_gemini_s1.sh
 |---|---|---|
 | B0.1 | 编译成功，产物生成 | ☐ |
 | B0.2 | 烧录后串口稳定看到 `nsh>` | ☐ |
-| B0.3 | `velaguard selftest` → 24/24 通过（**与模拟器结果一致**） | ☐ |
+| B0.3 | `velaguard selftest` → 25/25 通过（**与模拟器结果一致**） | ☐ |
 | B0.4 | 官方 `mini_memo` 的 PTT 录音/放音/屏幕能力正常（验证平台能力） | ☐ |
 | B0.5 | `ls /dev` 确认 `/dev/audio/pcm0c`、`/dev/userleds`、`/dev/buttons` 实际路径 | ☐ |
 
@@ -714,7 +722,7 @@ velaguard enroll list      # 看最小集自检提示
 | `velaguard feed` 报「仅支持 16bit wav」 | wav 格式不对 | 先跑 `model/prepare_dataset.py` 转成 16kHz/16bit 单声道 |
 | B7.0 回放命中但麦克风播放不中 | 麦克风增益低 / 距离远 / 音箱音量小 | 缩短到 1m、调大音量复测；仍不中再查 PCM 增益配置 |
 | B7 呻吟/呼救命中率明显低于其他类 | 已知数据缺口（见 `model/reports/metrics.md`），非环境问题 | 如实记录数字；靠 B8 模板与状态机重复确认兜底，不要现场反复重试 |
-| `velaguard status` 的模型行与文档数字不符 | 固件里的权重版本旧 | 对照 `trained_on` 标识：应为 `real:datasets+synth60`；不符则重编译烧录 |
+| `velaguard status` 的模型行与文档数字不符 | 固件里的权重版本旧 | 对照 `trained_on` 标识：应为 `real:datasets+synth60+featv2`；不符则重编译烧录 |
 | LED / 按键显示不可用 | 设备路径与默认值不符 | `ls /dev` 确认后改 menuconfig 里的三个路径 |
 | LCD 上是英文 | LVGL 默认字体不含 CJK | 内置 CJK 子集字体后把 `vg_ui_render(..., ascii=false)` |
 | 模拟器起不来、Qt 报错 | 无图形环境 | 加 `-no-window` |
@@ -727,12 +735,58 @@ velaguard enroll list      # 看最小集自检提示
 改任何代码后，至少跑这三条再继续：
 
 ```bash
-cd tests && make test                    # 主机侧 18 项
+cd tests && make test                    # 主机侧 21 项（环境完整时）
 ```
 
 ```sh
-velaguard selftest                       # 模拟器/真机 24 项
+velaguard selftest                       # 模拟器/真机 25 项
 velaguard bench 60                       # 性能没有退化
 ```
 
 三条全绿再做手动用例，否则先修。
+
+## 附：Linux 主机烧录环境修复（awusb 驱动）
+
+LiveSuit 的 awusb 内核模块（linux-sunxi/sunxi-livesuite）在新内核上编译报
+`archheaders` / `syscall_32.tbl` / `auto.conf.cmd` 错误的根因：其 Makefile
+用的是内核 5.3 起已移除的 `SUBDIRS=` 语法，make 认为在构建内核本体。
+把 Makefile 里的 `SUBDIRS=$(PWD)` 改为 `M=$(PWD)` 即可，普通用户即可编译：
+
+```bash
+sed -i 's/SUBDIRS=\$(PWD)/M=$(PWD)/' /tmp/sunxi-livesuite/awusb/Makefile
+make -C /tmp/sunxi-livesuite/awusb
+sudo insmod /tmp/sunxi-livesuite/awusb/awusb.ko
+```
+
+注意：若曾用旧语法失败过，headers 树里会留下残留生成物
+（`include/config/auto.conf.cmd` 等），用
+`sudo apt-get install --reinstall linux-headers-$(uname -r)` 恢复；
+虚拟机时钟漂移也会诱发同类重建，先校时。
+
+### 烧录操作步骤（LiveSuit，Linux 虚拟机）
+
+**① 加载驱动 + 设权限：**
+
+```bash
+sudo insmod /tmp/sunxi-livesuite/awusb/awusb.ko && sudo tee /etc/udev/rules.d/99-awusb.rules <<< 'SUBSYSTEM=="usb", ATTR{idVendor}=="1f3a", ATTR{idProduct}=="efe8", MODE="0666"
+KERNEL=="aw_efex*", MODE="0666"' && sudo udevadm control --reload && lsmod | grep awusb
+```
+
+**② 启动 LiveSuit（弹 GUI）：**
+
+```bash
+cd /tmp/sunxi-livesuite && ./LiveSuit.sh
+```
+
+GUI 里点 **Image**，选镜像：
+`vendor/allwinnertech/lichee/out/r528s3/gemini-s1_nand/rtos_nuttx_r528s3-gemini-s1_uart0_128Mnand.img`
+
+**③ 板子进 FEL 烧录模式：**
+
+1. 板子断电（拔线）
+2. **按住**板上 FEL/BOOT/烧录键 → **插 USB 到这台电脑** → 2 秒后松手
+3. ⚠️ 若在虚拟机里——USB 插入后宿主机可能弹「连接到哪个系统」，把 **Allwinner
+   设备（1f3a）连接到虚拟机**（VMware：可移动设备菜单；VirtualBox：设备→USB）
+4. 验证：`lsusb | grep 1f3a`
+
+看到设备后 LiveSuit 会提示，选**强制格式化烧写**，等进度条跑完板子自动重启。

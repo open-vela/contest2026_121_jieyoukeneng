@@ -14,7 +14,8 @@
  *   POST   /events        上传事件摘要（按 eventId 幂等 upsert）
  *   GET    /events        查询事件列表
  *   GET    /events/:id    查询单条事件
- *   PATCH  /events/:id    标记已处理 / 误报 / 稍后提醒
+ *   POST   /events/:id/commands  创建家属侧命令
+ *   PATCH  /events/:id    兼容入口：只创建命令，不直接改事件
  *   GET    /stream        SSE 实时事件流
  *   GET    /health        健康检查
  */
@@ -22,6 +23,7 @@
 'use strict';
 
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -29,6 +31,14 @@ const { DatabaseSync } = require('node:sqlite');
 const PORT = Number(process.env.VELAGUARD_PORT || 8080);
 const HOST = process.env.VELAGUARD_HOST || '0.0.0.0';
 const DB_PATH = process.env.VELAGUARD_DB || path.join(__dirname, 'events.db');
+const DEMO_PROFILE = (process.env.VELAGUARD_PROFILE || 'demo') !== 'production';
+const SESSION_TOKEN = process.env.VELAGUARD_SESSION_TOKEN || '';
+const EXPECTED_DEVICE_ID = process.env.VELAGUARD_DEVICE_ID || '';
+const COMMAND_ALG = DEMO_PROFILE ? 'demo.none' : 'hmac-sha256';
+const COMMAND_KEY_ID = process.env.VELAGUARD_COMMAND_KEY_ID ||
+  (DEMO_PROFILE ? 'demo' : '');
+const COMMAND_SIGNING_KEY = process.env.VELAGUARD_COMMAND_SIGNING_KEY ||
+  (DEMO_PROFILE ? 'demo-command-key' : '');
 
 const EVENT_TYPES = new Set([
   'alarm_beep', 'water_flow', 'impact', 'distress_voice', 'name_call_help',
@@ -38,9 +48,32 @@ const STATUSES = new Set([
   'pending', 'handled', 'false_alarm', 'snoozed', 'no_response',
 ]);
 const UPLOAD_REASONS = new Set(['manual_test', 'escalated', 'sync']);
+const ACTION_TYPES = new Set(['handled', 'false_alarm', 'snooze']);
+const ENVELOPE_SCHEMA = 'event.v1';
+const ACK_SCHEMA = 'ack.v1';
 
 /* 明确禁止的字段：原始音频与对话文本绝不允许进入控制台（隐私红线） */
 const FORBIDDEN_FIELDS = ['audio', 'pcm', 'wav', 'transcript', 'rawText', 'dialog'];
+
+function isObject(v) {
+  return v != null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function isFiniteNumber(v, min, max) {
+  return typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+}
+
+function idOk(v) {
+  return typeof v === 'string' && /^[A-Za-z0-9_.-]+$/.test(v) && v.length > 0;
+}
+
+function textOk(v, maxLen = 512) {
+  return typeof v === 'string' && v.length <= maxLen && !/[\u0000-\u001f]/.test(v);
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 // ---------------------------------------------------------------------------
 // 存储
@@ -66,35 +99,101 @@ db.exec(`
     repeatCount   INTEGER,
     summary       TEXT,
     advice        TEXT,
+    messageId     TEXT,
+    deviceEpoch   TEXT,
+    deviceSeq     INTEGER NOT NULL DEFAULT 0,
+    eventRevision INTEGER NOT NULL DEFAULT 1,
+    traceId       TEXT,
+    source        TEXT NOT NULL DEFAULT 'device',
+    adviceRevision INTEGER NOT NULL DEFAULT 0,
     receivedAt    TEXT NOT NULL,
     updatedAt     TEXT NOT NULL
   )
 `);
 
-const upsert = db.prepare(`
-  INSERT INTO events (eventId, deviceId, eventType, level, confidence,
-                      startedAt, durationSec, localStatus, uploadReason,
-                      timeReliable, night, matchedPhrase, personLabel,
-                      urgency, repeatCount, summary, advice,
-                      receivedAt, updatedAt)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(eventId) DO UPDATE SET
-    level        = excluded.level,
-    confidence   = excluded.confidence,
-    durationSec  = excluded.durationSec,
-    localStatus  = excluded.localStatus,
-    uploadReason = excluded.uploadReason,
-    summary      = excluded.summary,
-    advice       = excluded.advice,
-    repeatCount  = excluded.repeatCount,
-    updatedAt    = excluded.updatedAt
-`);
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare('PRAGMA table_info(' + table + ')').all();
+  if (!columns.some((item) => item.name === column)) {
+    db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + definition);
+  }
+}
+
+ensureColumn('events', 'messageId', 'TEXT');
+ensureColumn('events', 'deviceEpoch', 'TEXT');
+ensureColumn('events', 'deviceSeq', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('events', 'eventRevision', 'INTEGER NOT NULL DEFAULT 1');
+ensureColumn('events', 'traceId', 'TEXT');
+ensureColumn('events', 'source', "TEXT NOT NULL DEFAULT 'device'");
+ensureColumn('events', 'adviceRevision', 'INTEGER NOT NULL DEFAULT 0');
+
+db.exec(
+  'CREATE TABLE IF NOT EXISTS ingress_messages (' +
+  'messageId TEXT PRIMARY KEY, deviceId TEXT NOT NULL, eventId TEXT NOT NULL, ' +
+  'eventRevision INTEGER NOT NULL, receivedAt TEXT NOT NULL);' +
+  'CREATE TABLE IF NOT EXISTS commands (' +
+  'commandId TEXT PRIMARY KEY, deviceId TEXT NOT NULL, eventId TEXT, ' +
+  'commandType TEXT NOT NULL, action TEXT, desiredRevision INTEGER, ' +
+  'nonce TEXT NOT NULL, issuedAt TEXT NOT NULL, expiresAt TEXT NOT NULL, ' +
+  'status TEXT NOT NULL, resultRevision INTEGER, errorCode TEXT, ' +
+  'createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);' +
+  'CREATE TABLE IF NOT EXISTS audit_log (' +
+  'auditId INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, ' +
+  'deviceId TEXT, commandId TEXT, action TEXT NOT NULL, result TEXT NOT NULL, ' +
+  'createdAt TEXT NOT NULL)'
+);
+
+ensureColumn('commands', 'alg', "TEXT NOT NULL DEFAULT 'demo.none'");
+ensureColumn('commands', 'keyId', "TEXT NOT NULL DEFAULT 'demo'");
+ensureColumn('commands', 'signature', "TEXT NOT NULL DEFAULT 'demo-unsigned'");
+
+const upsertEvent = db.prepare(
+  'INSERT INTO events (eventId, deviceId, eventType, level, confidence, ' +
+  'startedAt, durationSec, localStatus, uploadReason, timeReliable, night, ' +
+  'matchedPhrase, personLabel, urgency, repeatCount, summary, advice, ' +
+  'messageId, deviceEpoch, deviceSeq, eventRevision, traceId, source, ' +
+  'adviceRevision, receivedAt, updatedAt) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+  'ON CONFLICT(eventId) DO UPDATE SET ' +
+  'level = excluded.level, confidence = excluded.confidence, ' +
+  'durationSec = excluded.durationSec, localStatus = excluded.localStatus, ' +
+  'uploadReason = excluded.uploadReason, summary = excluded.summary, ' +
+  'advice = excluded.advice, repeatCount = excluded.repeatCount, ' +
+  'messageId = excluded.messageId, deviceEpoch = excluded.deviceEpoch, ' +
+  'deviceSeq = excluded.deviceSeq, eventRevision = excluded.eventRevision, ' +
+  'traceId = excluded.traceId, source = excluded.source, ' +
+  'adviceRevision = excluded.adviceRevision, updatedAt = excluded.updatedAt ' +
+  'WHERE excluded.eventRevision > events.eventRevision OR ' +
+  '(excluded.eventRevision = events.eventRevision AND ' +
+  'excluded.adviceRevision >= events.adviceRevision)'
+);
 
 const selectOne = db.prepare('SELECT * FROM events WHERE eventId = ?');
 const selectMany = db.prepare(
   'SELECT * FROM events ORDER BY receivedAt DESC, rowid DESC LIMIT ?');
-const patchStatus = db.prepare(
-  'UPDATE events SET localStatus = ?, updatedAt = ? WHERE eventId = ?');
+const selectIngress = db.prepare(
+  'SELECT * FROM ingress_messages WHERE messageId = ?');
+const insertIngress = db.prepare(
+  'INSERT INTO ingress_messages ' +
+  '(messageId, deviceId, eventId, eventRevision, receivedAt) VALUES (?, ?, ?, ?, ?)');
+const selectCommand = db.prepare(
+  'SELECT * FROM commands WHERE commandId = ?');
+const insertCommand = db.prepare(
+  'INSERT INTO commands ' +
+  '(commandId, deviceId, eventId, commandType, action, desiredRevision, ' +
+  'nonce, issuedAt, expiresAt, status, alg, keyId, signature, ' +
+  'createdAt, updatedAt) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const updateCommandReceipt = db.prepare(
+  "UPDATE commands SET status = CASE WHEN status = 'requested' " +
+  "THEN 'received' ELSE status END, updatedAt = ? " +
+  "WHERE commandId = ? AND deviceId = ?");
+const updateCommandResult = db.prepare(
+  'UPDATE commands SET status = ?, resultRevision = ?, errorCode = ?, ' +
+  'updatedAt = ? WHERE commandId = ? AND deviceId = ?');
+const insertAudit = db.prepare(
+  'INSERT INTO audit_log ' +
+  '(actor, deviceId, commandId, action, result, createdAt) ' +
+  'VALUES (?, ?, ?, ?, ?, ?)');
 
 // ---------------------------------------------------------------------------
 // SSE
@@ -117,53 +216,201 @@ function broadcast(type, payload) {
 // 校验
 // ---------------------------------------------------------------------------
 
-function validate(evt) {
+const ENVELOPE_FIELDS = new Set([
+  'protocol', 'schema', 'messageType', 'messageId', 'deviceId',
+  'deviceEpoch', 'deviceSeq', 'eventId', 'eventRevision', 'sentAt',
+  'monotonicMs', 'traceId', 'payload',
+]);
+const PAYLOAD_FIELDS = new Set([
+  'eventId', 'deviceId', 'eventType', 'level', 'confidence', 'startedAt',
+  'durationSec', 'localStatus', 'uploadReason', 'timeReliable', 'night',
+  'matchedPhrase', 'personLabel', 'urgency', 'repeatCount', 'summary',
+  'advice',
+]);
+
+function scanPrivacy(value, path, errors) {
+  if (!isObject(value) && !Array.isArray(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    const lower = key.toLowerCase();
+    if (FORBIDDEN_FIELDS.some((name) => lower === name.toLowerCase()) ||
+        /password|passwd|token|secret|privatekey|credential|certificate/.test(lower)) {
+      errors.push('隐私红线：不允许字段 ' + path + key);
+    }
+    scanPrivacy(child, path + key + '.', errors);
+  }
+}
+
+function validateEventPayload(payload, strict = true) {
   const errors = [];
-  if (!evt || typeof evt !== 'object') return ['负载不是 JSON 对象'];
-
-  for (const f of FORBIDDEN_FIELDS) {
-    if (f in evt) errors.push(`隐私红线：不允许上传字段 ${f}`);
+  if (!isObject(payload)) return ['payload 不是 JSON 对象'];
+  scanPrivacy(payload, '', errors);
+  if (strict) {
+    for (const key of Object.keys(payload)) {
+      if (!PAYLOAD_FIELDS.has(key)) errors.push('payload 未知字段: ' + key);
+    }
   }
 
-  if (!evt.eventId) errors.push('缺少 eventId');
-  if (!evt.deviceId) errors.push('缺少 deviceId');
-  if (!EVENT_TYPES.has(evt.eventType)) {
-    errors.push(`eventType 非法: ${evt.eventType}`);
+  if (!idOk(payload.eventId) || payload.eventId.length > 40) {
+    errors.push('eventId 非法');
   }
-  if (!LEVELS.has(evt.level)) errors.push(`level 非法: ${evt.level}`);
-  if (evt.localStatus && !STATUSES.has(evt.localStatus)) {
-    errors.push(`localStatus 非法: ${evt.localStatus}`);
+  if (!idOk(payload.deviceId) || payload.deviceId.length > 32) {
+    errors.push('deviceId 非法');
   }
-  if (evt.uploadReason && !UPLOAD_REASONS.has(evt.uploadReason)) {
-    errors.push(`uploadReason 非法: ${evt.uploadReason}`);
+  if (!EVENT_TYPES.has(payload.eventType)) {
+    errors.push('eventType 非法: ' + payload.eventType);
   }
-  if (evt.confidence != null &&
-      (typeof evt.confidence !== 'number' ||
-       evt.confidence < 0 || evt.confidence > 1)) {
-    errors.push('confidence 必须在 0~1 之间');
+  if (!LEVELS.has(payload.level)) errors.push('level 非法: ' + payload.level);
+  if (!STATUSES.has(payload.localStatus)) {
+    errors.push('localStatus 非法: ' + payload.localStatus);
+  }
+  if (!UPLOAD_REASONS.has(payload.uploadReason)) {
+    errors.push('uploadReason 非法: ' + payload.uploadReason);
+  }
+  if (!isFiniteNumber(payload.confidence, 0, 1)) {
+    errors.push('confidence 必须是有限的 0~1 数值');
+  }
+  if (!textOk(payload.startedAt, 64) || Number.isNaN(Date.parse(payload.startedAt))) {
+    errors.push('startedAt 非法');
+  }
+  if (!Number.isInteger(payload.durationSec) ||
+      payload.durationSec < 0 || payload.durationSec > 604800) {
+    errors.push('durationSec 越界');
+  }
+  if (typeof payload.timeReliable !== 'boolean' ||
+      typeof payload.night !== 'boolean') {
+    errors.push('timeReliable/night 必须是布尔值');
+  }
+  if (!textOk(payload.summary, 128)) errors.push('summary 非法或过长');
+  for (const key of ['matchedPhrase', 'personLabel']) {
+    if (payload[key] != null && !textOk(payload[key], 64)) {
+      errors.push(key + ' 非法或过长');
+    }
+  }
+  if (payload.urgency != null && !isFiniteNumber(payload.urgency, 0, 1)) {
+    errors.push('urgency 必须在 0~1');
+  }
+  if (payload.repeatCount != null &&
+      (!Number.isInteger(payload.repeatCount) ||
+       payload.repeatCount < 0 || payload.repeatCount > 10000)) {
+    errors.push('repeatCount 越界');
+  }
+  if (payload.advice != null && !textOk(payload.advice, 256)) {
+    errors.push('advice 非法或过长');
   }
   return errors;
 }
 
-function row(evt, now, existing) {
+function normalizeIngress(body, targetDeviceId = null) {
+  const errors = [];
+  if (!isObject(body)) return { errors: ['负载不是 JSON 对象'] };
+  scanPrivacy(body, '', errors);
+
+  if (body.schema === ENVELOPE_SCHEMA) {
+    for (const key of Object.keys(body)) {
+      if (!ENVELOPE_FIELDS.has(key)) errors.push('envelope 未知字段: ' + key);
+    }
+    if (body.protocol !== 'velaguard' || body.messageType !== 'event.upsert') {
+      errors.push('protocol/messageType 不支持');
+    }
+    if (!idOk(body.messageId) || body.messageId.length > 48) {
+      errors.push('messageId 非法');
+    }
+    if (!idOk(body.deviceEpoch) || body.deviceEpoch.length > 40) {
+      errors.push('deviceEpoch 非法');
+    }
+    if (!Number.isSafeInteger(body.deviceSeq) || body.deviceSeq <= 0) {
+      errors.push('deviceSeq 非法');
+    }
+    if (!Number.isInteger(body.eventRevision) || body.eventRevision <= 0) {
+      errors.push('eventRevision 非法');
+    }
+    if (!textOk(body.sentAt, 64) || Number.isNaN(Date.parse(body.sentAt))) {
+      errors.push('sentAt 非法');
+    }
+    if (!Number.isSafeInteger(body.monotonicMs) || body.monotonicMs < 0) {
+      errors.push('monotonicMs 非法');
+    }
+    if (!idOk(body.traceId) || body.traceId.length > 48) {
+      errors.push('traceId 非法');
+    }
+    const payloadErrors = validateEventPayload(body.payload, true);
+    errors.push(...payloadErrors);
+    if (body.deviceId !== body.payload?.deviceId ||
+        body.eventId !== body.payload?.eventId ||
+        body.deviceId !== targetDeviceId && targetDeviceId != null) {
+      errors.push('envelope 与 payload/URL 身份不一致');
+    }
+    if (body.payload?.eventRevision != null &&
+        body.payload.eventRevision !== body.eventRevision) {
+      errors.push('eventRevision 不一致');
+    }
+    return {
+      errors,
+      envelope: body,
+      payload: body.payload,
+      metadata: {
+        messageId: body.messageId,
+        deviceEpoch: body.deviceEpoch,
+        deviceSeq: body.deviceSeq,
+        eventRevision: body.eventRevision,
+        traceId: body.traceId,
+        source: 'device',
+      },
+    };
+  }
+
+  if (!DEMO_PROFILE) {
+    errors.push('生产 profile 拒绝未版本化事件');
+    return { errors };
+  }
+
+  const legacyErrors = validateEventPayload(body, false);
+  errors.push(...legacyErrors);
+  if (errors.length) return { errors };
+  const revision = Number.isInteger(body.eventRevision) &&
+                   body.eventRevision > 0 ? body.eventRevision : 1;
+  const legacyId = 'legacy_' + body.deviceId + '_' + body.eventId + '_' + revision;
+  return {
+    errors,
+    envelope: null,
+    payload: body,
+    metadata: {
+      messageId: legacyId.slice(0, 48),
+      deviceEpoch: 'legacy',
+      deviceSeq: 0,
+      eventRevision: revision,
+      traceId: legacyId.slice(0, 48),
+      source: 'legacy-demo',
+    },
+  };
+}
+
+function rowV1(payload, metadata, now, existing) {
   return [
-    evt.eventId,
-    evt.deviceId,
-    evt.eventType,
-    evt.level,
-    evt.confidence ?? null,
-    evt.startedAt ?? now,
-    evt.durationSec ?? 0,
-    evt.localStatus ?? 'pending',
-    evt.uploadReason ?? 'sync',
-    evt.timeReliable ? 1 : 0,
-    evt.night ? 1 : 0,
-    evt.matchedPhrase ?? null,
-    evt.personLabel ?? null,
-    evt.urgency ?? null,
-    evt.repeatCount ?? 0,
-    evt.summary ?? '',
-    evt.advice ?? '',
+    payload.eventId,
+    payload.deviceId,
+    payload.eventType,
+    payload.level,
+    payload.confidence,
+    payload.startedAt,
+    payload.durationSec,
+    payload.localStatus,
+    payload.uploadReason,
+    payload.timeReliable ? 1 : 0,
+    payload.night ? 1 : 0,
+    payload.matchedPhrase ?? null,
+    payload.personLabel ?? null,
+    payload.urgency ?? null,
+    payload.repeatCount ?? 0,
+    payload.summary,
+    payload.advice ?? '',
+    metadata.messageId,
+    metadata.deviceEpoch,
+    metadata.deviceSeq,
+    metadata.eventRevision,
+    metadata.traceId,
+    metadata.source,
+    0,
     existing ? existing.receivedAt : now,
     now,
   ];
@@ -173,14 +420,65 @@ function row(evt, now, existing) {
 // HTTP
 // ---------------------------------------------------------------------------
 
+const DEVICE_TOKEN = process.env.VELAGUARD_DEVICE_TOKEN ||
+  (DEMO_PROFILE ? 'demo-token' : '');
+const ALLOWED_ORIGIN = process.env.VELAGUARD_CORS_ORIGIN || '';
+const DEMO_ALLOW_ANONYMOUS = DEMO_PROFILE &&
+  process.env.VELAGUARD_ALLOW_ANONYMOUS !== 'false';
+
+function tokenFromRequest(req) {
+  const auth = req.headers.authorization || '';
+  return auth.startsWith('Bearer ') ? auth.slice(7) :
+    String(req.headers['x-velaguard-device-token'] || '');
+}
+
+function tokenMatches(actual, expected) {
+  if (!actual || !expected || actual.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
+}
+
+function authorizedDevice(req, deviceId) {
+  if (!idOk(deviceId)) return false;
+  if (!DEMO_PROFILE && (!EXPECTED_DEVICE_ID ||
+                        deviceId !== EXPECTED_DEVICE_ID)) {
+    return false;
+  }
+  const token = tokenFromRequest(req);
+  if (DEVICE_TOKEN && tokenMatches(token, DEVICE_TOKEN)) return true;
+  if (DEMO_ALLOW_ANONYMOUS && !token) {
+    console.warn('[console] 演示模式允许匿名设备接入，仅限局域网演示');
+    return true;
+  }
+  return false;
+}
+
+function authorizedSession(req) {
+  const token = String(req.headers.authorization || '').replace(/^Bearer /, '');
+  if (SESSION_TOKEN) return tokenMatches(token, SESSION_TOKEN);
+  return DEMO_ALLOW_ANONYMOUS && !token;
+}
+
+function corsHeaders(req) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGIN && origin === ALLOWED_ORIGIN) {
+    return {
+      'Access-Control-Allow-Origin': origin,
+      Vary: 'Origin',
+    };
+  }
+  return { Vary: 'Origin' };
+}
+
 function send(res, code, body, headers = {}) {
   const data = typeof body === 'string' ? body : JSON.stringify(body);
   res.writeHead(code, {
     'Content-Type': typeof body === 'string'
       ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-VelaGuard-Device-Token, Idempotency-Key',
+    ...corsHeaders(res.req || { headers: {} }),
     ...headers,
   });
   res.end(data);
@@ -189,12 +487,17 @@ function send(res, code, body, headers = {}) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
+    let failed = false;
     req.on('data', (c) => {
+      if (failed) return;
       raw += c;
-      if (raw.length > 64 * 1024) reject(new Error('负载过大'));
+      if (raw.length > 64 * 1024) {
+        failed = true;
+        reject(new Error('负载过大'));
+      }
     });
-    req.on('end', () => resolve(raw));
-    req.on('error', reject);
+    req.on('end', () => { if (!failed) resolve(raw); });
+    req.on('error', (error) => { if (!failed) reject(error); });
   });
 }
 
@@ -214,6 +517,180 @@ function serveStatic(res, urlPath) {
   });
 }
 
+function eventIngressAck(metadata, accepted, duplicate, errorCode = null) {
+  return {
+    schema: ACK_SCHEMA,
+    messageType: 'eventIngressAck',
+    messageId: metadata.messageId,
+    deviceId: metadata.deviceId,
+    eventId: metadata.eventId,
+    eventRevision: metadata.eventRevision,
+    accepted,
+    duplicate,
+    serverTime: nowIso(),
+    errorCode,
+    traceId: metadata.traceId || metadata.messageId,
+  };
+}
+
+function commandResultAck(deviceId, commandId, messageId, accepted,
+                          duplicate, errorCode = null) {
+  return {
+    schema: ACK_SCHEMA,
+    messageType: 'commandResultIngressAck',
+    messageId,
+    deviceId,
+    commandId,
+    accepted,
+    duplicate,
+    serverTime: nowIso(),
+    errorCode,
+  };
+}
+
+function commandReceiptAck(deviceId, commandId, messageId, duplicate,
+                           errorCode = null) {
+  return {
+    schema: ACK_SCHEMA,
+    messageType: 'commandReceiptAck',
+    messageId,
+    deviceId,
+    commandId,
+    accepted: true,
+    duplicate,
+    serverTime: nowIso(),
+    errorCode,
+  };
+}
+
+function commandCanonical(command) {
+  const args = {};
+  if (command.eventId) args.eventId = command.eventId;
+  if (command.action) args.action = command.action;
+  return JSON.stringify({
+    schema: 'command.v1',
+    commandId: command.commandId,
+    targetDeviceId: command.deviceId,
+    commandType: command.commandType,
+    issuedAt: command.issuedAt,
+    expiresAt: command.expiresAt,
+    desiredRevision: command.desiredRevision,
+    nonce: command.nonce,
+    args,
+    alg: command.alg,
+    keyId: command.keyId,
+  });
+}
+
+function commandSignature(command) {
+  if (command.alg === 'demo.none') return 'demo-unsigned';
+  if (!COMMAND_SIGNING_KEY || !COMMAND_KEY_ID) return null;
+  return crypto.createHmac('sha256', COMMAND_SIGNING_KEY)
+    .update(commandCanonical(command))
+    .digest('base64url');
+}
+
+function commandView(command) {
+  if (!command) return null;
+  return {
+    commandId: command.commandId,
+    schema: 'command.v1',
+    deviceId: command.deviceId,
+    targetDeviceId: command.deviceId,
+    eventId: command.eventId,
+    commandType: command.commandType,
+    action: command.action,
+    desiredRevision: command.desiredRevision,
+    issuedAt: command.issuedAt,
+    expiresAt: command.expiresAt,
+    status: command.status,
+    nonce: command.nonce,
+    args: { eventId: command.eventId, action: command.action },
+    alg: command.alg || (DEMO_PROFILE ? 'demo.none' : 'hmac-sha256'),
+    keyId: command.keyId || (DEMO_PROFILE ? 'demo' : ''),
+    signature: command.signature || (DEMO_PROFILE ? 'demo-unsigned' : ''),
+    resultRevision: command.resultRevision,
+    errorCode: command.errorCode,
+    createdAt: command.createdAt,
+    updatedAt: command.updatedAt,
+  };
+}
+
+function createCommand(event, body, actor) {
+  if (!isObject(body)) {
+    return { error: '命令负载必须是 JSON 对象', code: 400 };
+  }
+
+  const now = nowIso();
+  const commandId = body.commandId ||
+    String(body.idempotencyKey || '') ||
+    'cmd_' + Date.now().toString(36) + '_' +
+    Math.random().toString(36).slice(2, 10);
+  const nonce = body.nonce || 'nonce_' + Date.now().toString(36);
+  const desiredRevision = body.desiredRevision == null
+    ? event.eventRevision : body.desiredRevision;
+  const expiresAt = body.expiresAt || new Date(Date.now() + 120000).toISOString();
+  const action = body.action;
+
+  if (!idOk(commandId) || commandId.length > 64 ||
+      !idOk(nonce) || nonce.length > 96 ||
+      !ACTION_TYPES.has(action) ||
+      !Number.isInteger(desiredRevision) || desiredRevision <= 0 ||
+      desiredRevision !== event.eventRevision ||
+      Number.isNaN(Date.parse(expiresAt)) ||
+      Date.parse(expiresAt) <= Date.now()) {
+    return { error: '命令字段、修订号或有效期非法', code: 400 };
+  }
+  if (action === 'snooze' && event.level === 'emergency') {
+    return { error: '紧急事件禁止远程 snooze', code: 409 };
+  }
+
+  const existing = selectCommand.get(commandId);
+  if (existing) return { command: existing, duplicate: true };
+
+  const command = {
+    commandId,
+    deviceId: event.deviceId,
+    eventId: event.eventId,
+    commandType: 'event.action',
+    action,
+    desiredRevision,
+    nonce,
+    issuedAt: now,
+    expiresAt,
+    status: 'requested',
+    resultRevision: null,
+    errorCode: null,
+    createdAt: now,
+    updatedAt: now,
+    alg: COMMAND_ALG,
+    keyId: COMMAND_KEY_ID,
+    signature: null,
+  };
+
+  command.signature = commandSignature(command);
+  if (!command.signature) {
+    return { error: '生产命令签名器未配置', code: 503 };
+  }
+
+  db.exec('BEGIN');
+  try {
+    insertCommand.run(
+      command.commandId, command.deviceId, command.eventId,
+      command.commandType, command.action, command.desiredRevision,
+      command.nonce, command.issuedAt, command.expiresAt, command.status,
+      command.alg, command.keyId, command.signature,
+      command.createdAt, command.updatedAt);
+    insertAudit.run(actor, command.deviceId, command.commandId,
+                    'event.action.' + action, 'requested', now);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    return { error: '命令持久化失败: ' + error.message, code: 503 };
+  }
+  return { command, duplicate: false };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const { pathname } = url;
@@ -222,11 +699,14 @@ const server = http.createServer(async (req, res) => {
 
   // --- SSE ---------------------------------------------------------------
   if (req.method === 'GET' && pathname === '/stream') {
+    if (!authorizedSession(req)) {
+      return send(res, 401, { ok: false, error: '需要家属会话授权' });
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      ...corsHeaders(req),
     });
     res.write(`event: hello\ndata: ${JSON.stringify({ ok: true })}\n\n`);
     clients.add(res);
@@ -240,49 +720,284 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && pathname === '/health') {
     return send(res, 200, {
       ok: true,
+      profile: DEMO_PROFILE ? 'demo' : 'production',
+      warning: DEMO_PROFILE ? '演示 profile：请勿暴露到公网' : undefined,
       clients: clients.size,
       events: db.prepare('SELECT COUNT(*) AS n FROM events').get().n,
     });
   }
 
-  // --- 上传事件 -----------------------------------------------------------
-  if (req.method === 'POST' && pathname === '/events') {
-    let evt;
+  if (req.method === 'POST' &&
+      (pathname === '/events' ||
+       /^\/v1\/devices\/[\w.-]+\/events$/.test(pathname))) {
+    const targetMatch = pathname.match(/^\/v1\/devices\/([\w.-]+)\/events$/);
+    let body;
     try {
-      evt = JSON.parse(await readBody(req));
-    } catch (e) {
-      return send(res, 400, { ok: false, errors: ['JSON 解析失败'] });
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return send(res, 400, { ok: false, errorCode: 'invalid_json',
+        errors: ['JSON 解析失败'] });
     }
 
-    const errors = validate(evt);
-    if (errors.length) {
-      console.warn('[console] 拒绝非法事件:', errors.join('; '));
-      return send(res, 400, { ok: false, errors });
+    const normalized = normalizeIngress(body, targetMatch?.[1] || null);
+    if (normalized.errors.length) {
+      console.warn('[console] 拒绝非法事件:', normalized.errors.join('; '));
+      return send(res, 400, { ok: false, errorCode: 'invalid_event',
+        errors: normalized.errors });
     }
 
-    const now = new Date().toISOString();
-    const existing = selectOne.get(evt.eventId);
-    upsert.run(...row(evt, now, existing));
-    const saved = selectOne.get(evt.eventId);
+    const payload = normalized.payload;
+    const metadata = {
+      ...normalized.metadata,
+      deviceId: payload.deviceId,
+      eventId: payload.eventId,
+    };
+    if (!authorizedDevice(req, payload.deviceId)) {
+      return send(res, 401, { ok: false, errorCode: 'device_unauthorized' });
+    }
 
-    /* 幂等：同一 eventId 重复上传只更新，不重复推送新卡片 */
-    broadcast(existing ? 'update' : 'event', saved);
-    console.log(`[console] ${existing ? '更新' : '新增'} ${evt.eventId} ` +
-                `${evt.eventType}/${evt.level}/${saved.localStatus}`);
+    const previousMessage = selectIngress.get(metadata.messageId);
+    if (previousMessage) {
+      if (previousMessage.deviceId !== metadata.deviceId ||
+          previousMessage.eventId !== metadata.eventId ||
+          previousMessage.eventRevision !== metadata.eventRevision) {
+        return send(res, 409, { ok: false, errorCode: 'message_identity_conflict' });
+      }
+      const saved = selectOne.get(metadata.eventId);
+      return send(res, 200, {
+        ok: true,
+        duplicated: true,
+        ack: eventIngressAck(metadata, true, true),
+        event: saved,
+      });
+    }
 
-    return send(res, existing ? 200 : 201,
-                { ok: true, duplicated: Boolean(existing), event: saved });
+    const now = nowIso();
+    const existing = selectOne.get(payload.eventId);
+    if (existing && existing.deviceId !== payload.deviceId) {
+      return send(res, 409, { ok: false, errorCode: 'event_device_conflict' });
+    }
+    const duplicate = Boolean(existing &&
+      existing.eventRevision >= metadata.eventRevision);
+
+    db.exec('BEGIN');
+    try {
+      upsertEvent.run(...rowV1(payload, metadata, now, existing));
+      insertIngress.run(metadata.messageId, metadata.deviceId,
+                        metadata.eventId, metadata.eventRevision, now);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      console.error('[console] 事件持久化失败:', error.message);
+      return send(res, 503, { ok: false, errorCode: 'store_unavailable' });
+    }
+
+    const saved = selectOne.get(payload.eventId);
+    if (!duplicate) {
+      broadcast(existing ? 'update' : 'event', saved);
+    }
+    console.log('[console] ' + (duplicate ? '重复/旧修订' :
+      (existing ? '更新' : '新增')) + ' ' + payload.eventId + ' ' +
+      payload.eventType + '/' + payload.level + '/' + saved.localStatus);
+
+    return send(res, 200, {
+      ok: true,
+      duplicated: duplicate,
+      ack: eventIngressAck(metadata, true, duplicate),
+      event: saved,
+    });
   }
 
   // --- 查询列表 -----------------------------------------------------------
   if (req.method === 'GET' && pathname === '/events') {
+    if (!authorizedSession(req)) {
+      return send(res, 401, { ok: false, error: '需要家属会话授权' });
+    }
     const limit = Math.min(Number(url.searchParams.get('limit') || 100), 500);
     return send(res, 200, { ok: true, events: selectMany.all(limit) });
   }
 
-  // --- 单条查询 / 状态回写 -------------------------------------------------
+  const commandPath = pathname.match(/^\/events\/([\w.-]+)\/commands$/);
+  if (req.method === 'POST' && commandPath) {
+    if (!authorizedSession(req)) {
+      return send(res, 401, { ok: false, error: '需要家属会话授权' });
+    }
+    const event = selectOne.get(commandPath[1]);
+    if (!event) return send(res, 404, { ok: false, error: '未找到事件' });
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return send(res, 400, { ok: false, error: 'JSON 解析失败' });
+    }
+    const idempotencyKey = req.headers['idempotency-key'];
+    if (idempotencyKey && isObject(body) && body.idempotencyKey == null) {
+      body = { ...body, idempotencyKey: String(idempotencyKey) };
+    }
+    const result = createCommand(event, body, 'family-session');
+    if (result.error) {
+      return send(res, result.code, { ok: false, error: result.error });
+    }
+    const command = result.command;
+    if (!result.duplicate) {
+      broadcast('command', commandView(command));
+    }
+    return send(res, result.duplicate ? 200 : 202, {
+      ok: true,
+      duplicated: result.duplicate,
+      status: command.status,
+      requiresLocalConfirmation:
+        event.level === 'emergency' && body.action !== 'snooze',
+      command: commandView(command),
+      event,
+    });
+  }
+
+  const deviceCommandPath =
+    pathname.match(/^\/v1\/devices\/([\w.-]+)\/commands$/);
+  if (req.method === 'GET' && deviceCommandPath) {
+    const deviceId = deviceCommandPath[1];
+    if (!authorizedDevice(req, deviceId)) {
+      return send(res, 401, { ok: false, errorCode: 'device_unauthorized' });
+    }
+    const commands = db.prepare(
+      'SELECT * FROM commands WHERE deviceId = ? AND status = ? ' +
+      'ORDER BY createdAt ASC LIMIT 32').all(deviceId, 'requested');
+    return send(res, 200, { ok: true, commands: commands.map(commandView) });
+  }
+
+  const commandReceiptPath =
+    pathname.match(/^\/v1\/devices\/([\w.-]+)\/command-receipts$/);
+  if (req.method === 'POST' && commandReceiptPath) {
+    const deviceId = commandReceiptPath[1];
+    if (!authorizedDevice(req, deviceId)) {
+      return send(res, 401, { ok: false, errorCode: 'device_unauthorized' });
+    }
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return send(res, 400, { ok: false, errorCode: 'invalid_json' });
+    }
+    if (!isObject(body) || !idOk(body.commandId)) {
+      return send(res, 400, { ok: false, errorCode: 'invalid_command_receipt' });
+    }
+    const command = selectCommand.get(body.commandId);
+    if (!command || command.deviceId !== deviceId) {
+      return send(res, 404, { ok: false, errorCode: 'command_not_found' });
+    }
+    const duplicate = command.status !== 'requested';
+    if (!duplicate) {
+      const now = nowIso();
+      db.exec('BEGIN');
+      try {
+        updateCommandReceipt.run(now, body.commandId, deviceId);
+        insertAudit.run('device', deviceId, body.commandId,
+                        'command.receipt', 'received', now);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        return send(res, 503, { ok: false, errorCode: 'store_unavailable' });
+      }
+    }
+    const messageId = idOk(body.messageId) ? body.messageId : body.commandId;
+    return send(res, 200, {
+      ok: true,
+      ack: commandReceiptAck(deviceId, body.commandId, messageId, duplicate),
+      command: commandView(selectCommand.get(body.commandId)),
+    });
+  }
+
+  const commandResultPath =
+    pathname.match(/^\/v1\/devices\/([\w.-]+)\/command-results$/);
+  if (req.method === 'POST' && commandResultPath) {
+    const deviceId = commandResultPath[1];
+    if (!authorizedDevice(req, deviceId)) {
+      return send(res, 401, { ok: false, errorCode: 'device_unauthorized' });
+    }
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return send(res, 400, { ok: false, errorCode: 'invalid_json' });
+    }
+    if (!isObject(body)) {
+      return send(res, 400, { ok: false, errorCode: 'invalid_command_result' });
+    }
+    const command = selectCommand.get(body.commandId);
+    const allowedResults = new Set([
+      'received', 'applied', 'rejected', 'requires_local_confirmation',
+      'expired', 'stale', 'duplicate', 'failed',
+    ]);
+    if (!command || command.deviceId !== deviceId ||
+        !idOk(body.commandId) || !allowedResults.has(body.status) ||
+        (body.errorCode != null && !textOk(body.errorCode, 64)) ||
+        (body.messageId != null && !idOk(body.messageId)) ||
+        (body.resultRevision != null &&
+         (!Number.isInteger(body.resultRevision) || body.resultRevision <= 0))) {
+      return send(res, 400, { ok: false, errorCode: 'invalid_command_result' });
+    }
+    const messageId = idOk(body.messageId) ? body.messageId : body.commandId;
+    const duplicate = command.status === body.status &&
+      command.resultRevision === (body.resultRevision ?? null);
+    if (!duplicate) {
+      const now = nowIso();
+      db.exec('BEGIN');
+      try {
+        updateCommandResult.run(body.status, body.resultRevision ?? null,
+                                body.errorCode || null, now,
+                                body.commandId, deviceId);
+        insertAudit.run('device', deviceId, body.commandId,
+                        'command.result', body.status, now);
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        return send(res, 503, { ok: false, errorCode: 'store_unavailable' });
+      }
+    }
+    return send(res, 200, {
+      ok: true,
+      ack: commandResultAck(deviceId, body.commandId, messageId,
+                            true, duplicate),
+      command: commandView(selectCommand.get(body.commandId)),
+    });
+  }
+
+  const legacyPatch = pathname.match(/^\/events\/([\w.-]+)$/);
+  if (req.method === 'PATCH' && legacyPatch) {
+    if (!authorizedSession(req)) {
+      return send(res, 401, { ok: false, error: '需要家属会话授权' });
+    }
+    const event = selectOne.get(legacyPatch[1]);
+    if (!event) return send(res, 404, { ok: false, error: '未找到事件' });
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return send(res, 400, { ok: false, error: 'JSON 解析失败' });
+    }
+    const commandBody = isObject(body) ? body : {};
+    const result = createCommand(event, {
+      ...commandBody,
+      action: commandBody.action || commandBody.localStatus,
+    }, 'family-session');
+    if (result.error) return send(res, result.code, { ok: false, error: result.error });
+    return send(res, result.duplicate ? 200 : 202, {
+      ok: true,
+      duplicated: result.duplicate,
+      requested: true,
+      status: result.command.status,
+      command: commandView(result.command),
+      event,
+    });
+  }
+
+  // --- 单条查询 ------------------------------------------------------------
   const m = pathname.match(/^\/events\/([\w.-]+)$/);
   if (m) {
+    if (!authorizedSession(req)) {
+      return send(res, 401, { ok: false, error: '需要家属会话授权' });
+    }
     const id = m[1];
     const found = selectOne.get(id);
     if (!found) return send(res, 404, { ok: false, error: '未找到事件' });
@@ -290,21 +1005,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') return send(res, 200, { ok: true, event: found });
 
     if (req.method === 'PATCH') {
-      let body;
-      try {
-        body = JSON.parse(await readBody(req));
-      } catch {
-        return send(res, 400, { ok: false, error: 'JSON 解析失败' });
-      }
-      if (!STATUSES.has(body.localStatus)) {
-        return send(res, 400,
-          { ok: false, error: `localStatus 非法: ${body.localStatus}` });
-      }
-      patchStatus.run(body.localStatus, new Date().toISOString(), id);
-      const updated = selectOne.get(id);
-      broadcast('update', updated);
-      console.log(`[console] 家属侧标记 ${id} -> ${body.localStatus}`);
-      return send(res, 200, { ok: true, event: updated });
+      return send(res, 409, {
+        ok: false,
+        error: '状态不能由浏览器直接写入，请使用事件命令接口',
+      });
     }
   }
 

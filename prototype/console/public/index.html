@@ -58,6 +58,7 @@
   .advice b { color: #7fb3ff; font-weight: 600; }
   .meta { color: var(--muted); font-size: 12px; }
   .acts { display: flex; gap: 8px; margin-top: 10px; }
+  .command { margin-top: 8px; color: #f4c86b; font-size: 12px; }
   button {
     flex: 1; padding: 9px 0; border-radius: 8px; border: 1px solid var(--line);
     background: #1e2532; color: var(--text); font-size: 14px; cursor: pointer;
@@ -105,6 +106,7 @@ const empty = document.getElementById('empty');
 const dot = document.getElementById('dot');
 const sub = document.getElementById('sub');
 const seen = new Map();
+const commandStates = new Map();
 
 function fmtTime(iso) {
   if (!iso) return '';
@@ -123,6 +125,8 @@ function render(evt) {
   }
 
   const pending = evt.localStatus === 'pending' || evt.localStatus === 'no_response';
+  const commandState = commandStates.get(evt.eventId);
+  const canAct = ['pending', 'no_response', 'snoozed'].includes(evt.localStatus);
   card.className = `card ${evt.level}${pending ? ' pending' : ''}`;
 
   const extra = [];
@@ -145,10 +149,12 @@ function render(evt) {
       持续 ${evt.durationSec || 0} 秒 · 置信度 ${((evt.confidence || 0) * 100).toFixed(0)}%
       · ${evt.deviceId}${extra.length ? ' · ' + extra.join(' · ') : ''}
     </div>
-    <div class="acts">
-      <button data-id="${evt.eventId}" data-st="handled">已联系/已处理</button>
-      <button data-id="${evt.eventId}" data-st="false_alarm">误报</button>
-    </div>`;
+    ${commandState ? `<div class="command">命令状态：${escapeHtml(commandState)}</div>` : ''}
+    ${canAct ? `<div class="acts">
+      <button data-id="${evt.eventId}" data-rev="${evt.eventRevision || 1}" data-st="handled">已联系/已处理</button>
+      <button data-id="${evt.eventId}" data-rev="${evt.eventRevision || 1}" data-st="false_alarm">误报</button>
+      <button data-id="${evt.eventId}" data-rev="${evt.eventRevision || 1}" data-st="snooze">稍后提醒</button>
+    </div>` : ''}`;
 
   empty.style.display = seen.size ? 'none' : '';
 }
@@ -163,11 +169,25 @@ list.addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   btn.disabled = true;
-  await fetch(`/events/${btn.dataset.id}`, {
-    method: 'PATCH',
+  try {
+    const r = await fetch(`/events/${btn.dataset.id}/commands`, {
+      method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ localStatus: btn.dataset.st }),
-  }).catch(() => {});
+      body: JSON.stringify({
+        action: btn.dataset.st,
+        desiredRevision: Number(btn.dataset.rev),
+      }),
+    });
+    const result = await r.json();
+    if (!r.ok) throw new Error(result.error || '命令被拒绝');
+    commandStates.set(btn.dataset.id,
+      result.requiresLocalConfirmation ? '待设备本地确认' : '已请求设备执行');
+    if (result.event) render(result.event);
+  } catch (error) {
+    commandStates.set(btn.dataset.id, `请求失败：${error.message}`);
+    const card = seen.get(btn.dataset.id);
+    if (card) card.querySelectorAll('button').forEach((item) => { item.disabled = false; });
+  }
   btn.disabled = false;
 });
 

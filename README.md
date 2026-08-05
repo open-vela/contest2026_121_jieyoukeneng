@@ -67,12 +67,12 @@ contest2026_121_jieyoukeneng/
 │   ├── event_log/               #   100 条环形事件日志，写入即落盘
 │   ├── uploader/                #   HTTP、notifier 三级回退、Skill 桥接、幂等重试队列
 │   ├── velaguard_daemon.c       #   守护主循环
-│   └── velaguard_main.c         #   NSH 命令入口 + 内置 24 项验收自检
+│   └── velaguard_main.c         #   NSH 命令入口 + 内置 25 项验收自检
 ├── agent_skill/anling-home-safety/  # 自定义 ai_agent Skill（部署到 /data/agent/skills/）
 ├── model/                       # 数据登记表、特征、合成自举数据集、训练与 int8 量化导出
 ├── prototype/console/           # 通知与演示控制台（Node 零依赖 + SQLite + SSE）
 ├── prototype/simulate/          # 五类模拟事件注入脚本（板前联调 + 演示兜底）
-├── tests/                       # 主机侧回归（18 项断言）+ 特征一致性校验 + 性能标定
+├── tests/                       # 主机侧回归（21 项断言，环境完整时）+ 特征一致性校验 + 性能标定
 ├── docs/                        # 架构说明、验收对照与实测结果、演示脚本
 ├── logs/                        # AI Coding 日志
 ├── config.example.json          # 配置模板（真实配置含凭证，不进 Git）
@@ -94,7 +94,7 @@ make && make test
 
 ```
 ======================================
-  回归结果：通过 18 项，失败 0 项
+  回归结果：通过 21 项，失败 0 项
 ======================================
 ```
 
@@ -121,7 +121,7 @@ echo "CONFIG_LVX_USE_DEMO_CONTEST2026_121_VELAGUARD=y" \
 看到 `goldfish-armv8a-ap>` 提示符后：
 
 ```sh
-velaguard selftest                 # 24 项内置验收自检，约 20 秒
+velaguard selftest                 # 25 项内置验收自检，约 20 秒
 velaguard bench 60                 # 识别链路性能标定
 velaguard sim alarm_beep --conf 0.95 --times 6 --interval 1000
 velaguard ui event                 # 事件确认页（与 LCD 同款内容）
@@ -209,8 +209,8 @@ POST 摘要、断网入队、恢复补发，全部不需要人介入。
 `SafetyEvent` 三个结构体和状态机回调，再并行铺开各模块。识别层只输出
 类别与置信度、决策全部在状态机——这个边界是设计时定死的，后面没有反复。
 
-**自动化验证代替人工点检**：`velaguard selftest` 的 24 项断言和
-`tests/run_tests.sh` 的 18 项回归都是在写功能的同时一起写的。
+**自动化验证代替人工点检**：`velaguard selftest` 的 25 项断言和
+`tests/run_tests.sh` 的 21 项回归都是在写功能的同时一起写的。
 其中**端侧 C 特征与训练脚本 Python 特征逐维一致性校验**这一条是 AI 提醒后
 补上的，实测最大误差 3.0e-05——没有这一条，电脑端的训练指标在板上是不可信的。
 

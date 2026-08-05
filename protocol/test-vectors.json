@@ -1,0 +1,72 @@
+{
+  "version": "protocol-test-vectors.v1",
+  "privacyRule": "任何音频、转写、完整对话和凭证字段都必须拒绝",
+  "validEvents": [
+    {
+      "protocol": "velaguard",
+      "schema": "event.v1",
+      "messageType": "event.upsert",
+      "messageId": "msg_b0001abcd_1",
+      "deviceId": "device_001",
+      "deviceEpoch": "b0001abcd",
+      "deviceSeq": 1,
+      "eventId": "evt_001",
+      "eventRevision": 1,
+      "sentAt": "2026-08-05T12:00:00+08:00",
+      "monotonicMs": 1000,
+      "traceId": "tr_b0001abcd_1",
+      "payload": {
+        "eventId": "evt_001",
+        "deviceId": "device_001",
+        "eventType": "impact",
+        "level": "warning",
+        "confidence": 0.86,
+        "startedAt": "2026-08-05T11:59:58+08:00",
+        "durationSec": 2,
+        "localStatus": "pending",
+        "uploadReason": "escalated",
+        "timeReliable": true,
+        "night": false,
+        "summary": "检测到疑似撞击声，等待本地确认",
+        "advice": "请电话确认现场情况"
+      }
+    }
+  ],
+  "replayAndOrdering": [
+    {
+      "name": "同消息重放",
+      "input": { "messageId": "msg_b0001abcd_1", "eventRevision": 1 },
+      "expected": "duplicate_success_ack"
+    },
+    {
+      "name": "旧修订",
+      "input": { "messageId": "msg_b0001abcd_0", "eventId": "evt_001", "eventRevision": 0 },
+      "expected": "invalid_event"
+    },
+    {
+      "name": "新修订",
+      "input": { "messageId": "msg_b0001abcd_2", "eventId": "evt_001", "eventRevision": 2 },
+      "expected": "upsert_without_duplicate_side_effect"
+    }
+  ],
+  "invalidEvents": [
+    { "name": "未知字段", "patch": { "payload": { "rawText": "不允许" } }, "expected": "invalid_event" },
+    { "name": "嵌套音频字段", "patch": { "payload": { "debug": { "wav": "不允许" } } }, "expected": "invalid_event" },
+    { "name": "非有限置信度", "patch": { "payload": { "confidence": "NaN" } }, "expected": "invalid_event" },
+    { "name": "身份不一致", "patch": { "payload": { "deviceId": "other_device" } }, "expected": "invalid_event" }
+  ],
+  "commands": [
+    {
+      "name": "紧急事件远程处理请求",
+      "commandType": "event.action",
+      "action": "handled",
+      "expected": "requires_local_confirmation"
+    },
+    {
+      "name": "紧急事件远程稍后提醒",
+      "commandType": "event.action",
+      "action": "snooze",
+      "expected": "rejected_emergency_snooze"
+    }
+  ]
+}

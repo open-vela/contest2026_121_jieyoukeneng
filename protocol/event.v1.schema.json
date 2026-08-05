@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velaguard.local/protocol/event.v1.schema.json",
+  "title": "VelaGuard event.v1 envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "schema", "messageType", "messageId", "deviceId",
+    "deviceEpoch", "deviceSeq", "eventId", "eventRevision", "sentAt",
+    "monotonicMs", "traceId", "payload"
+  ],
+  "properties": {
+    "protocol": { "const": "velaguard" },
+    "schema": { "const": "event.v1" },
+    "messageType": { "const": "event.upsert" },
+    "messageId": { "$ref": "#/$defs/id48" },
+    "deviceId": { "$ref": "#/$defs/id32" },
+    "deviceEpoch": { "$ref": "#/$defs/id40" },
+    "deviceSeq": { "type": "integer", "minimum": 1 },
+    "eventId": { "$ref": "#/$defs/id40" },
+    "eventRevision": { "type": "integer", "minimum": 1 },
+    "sentAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "monotonicMs": { "type": "integer", "minimum": 0 },
+    "traceId": { "$ref": "#/$defs/id48" },
+    "payload": { "$ref": "#/$defs/payload" }
+  },
+  "$defs": {
+    "id32": {
+      "type": "string", "minLength": 1, "maxLength": 32,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "id40": {
+      "type": "string", "minLength": 1, "maxLength": 40,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "id48": {
+      "type": "string", "minLength": 1, "maxLength": 48,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "safeText128": {
+      "type": "string", "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f]*$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId", "deviceId", "eventType", "level", "confidence",
+        "startedAt", "durationSec", "localStatus", "uploadReason",
+        "timeReliable", "night", "summary"
+      ],
+      "properties": {
+        "eventId": { "$ref": "#/$defs/id40" },
+        "deviceId": { "$ref": "#/$defs/id32" },
+        "eventType": {
+          "enum": ["alarm_beep", "water_flow", "impact",
+                   "distress_voice", "name_call_help"]
+        },
+        "level": { "enum": ["notice", "warning", "emergency"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "startedAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "durationSec": { "type": "integer", "minimum": 0, "maximum": 604800 },
+        "localStatus": {
+          "enum": ["pending", "handled", "false_alarm", "snoozed", "no_response"]
+        },
+        "uploadReason": { "enum": ["manual_test", "escalated", "sync"] },
+        "timeReliable": { "type": "boolean" },
+        "night": { "type": "boolean" },
+        "matchedPhrase": { "type": "string", "maxLength": 32 },
+        "personLabel": { "type": "string", "maxLength": 24 },
+        "urgency": { "type": "number", "minimum": 0, "maximum": 1 },
+        "repeatCount": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "summary": { "$ref": "#/$defs/safeText128" },
+        "advice": { "type": "string", "maxLength": 256 }
+      }
+    }
+  }
+}

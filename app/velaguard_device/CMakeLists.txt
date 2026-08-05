@@ -22,6 +22,7 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_121_VELAGUARD)
       audio_detector/vg_detector.c
       enrollment/vg_enroll.c
       uploader/vg_http.c
+      uploader/vg_transport.c
       uploader/vg_notifier.c
       uploader/vg_agent.c
       uploader/vg_uploader.c

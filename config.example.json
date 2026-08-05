@@ -2,9 +2,14 @@
   "_README": [
     "安聆 VelaGuard 运行配置模板。",
     "部署方法：拷贝为设备上的 /data/velaguard/config.json 后按实际环境修改。",
-    "真实配置含 Wi-Fi 密码与控制台/webhook 地址，绝不提交到 Git（.gitignore 已排除）。",
+    "真实配置含设备令牌、证书引用与控制台地址，绝不提交到 Git（.gitignore 已排除）。",
+    "demoMode=true 只用于局域网演示；生产 profile 必须使用 TLS、独立设备凭证和已验证签名。",
     "所有字段都可省略，省略时使用固件内置默认值。"
   ],
+
+  "schemaVersion": 1,
+  "configRevision": 1,
+  "configSignature": "",
 
   "deviceId": "velaguard_demo_001",
   "dataDir": "/data/velaguard",
@@ -13,6 +18,15 @@
   "consoleHost": "192.168.43.1",
   "consolePort": 8080,
   "consolePath": "/events",
+  "consoleTls": false,
+  "consoleServerName": "192.168.43.1",
+  "consoleCaPath": "",
+  "deviceToken": "",
+
+  "_productionGate": [
+    "当前仓库的 demo transport 只支持明文 HTTP；consoleTls=true 会拒绝发送，",
+    "接入官方 TLS/mTLS、证书校验、密钥存储和配置签名验证后才可开放生产 profile。"
+  ],
 
   "_webhook": "可选扩展通道，失败不影响主通道。真实地址不要写进仓库。",
   "webhookEnabled": false,

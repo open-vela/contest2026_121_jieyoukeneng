@@ -40,14 +40,41 @@ typedef struct
   float             urgency_peak;
 } vg_track_t;
 
+typedef enum
+{
+  VG_NOTIFY_CHANGED = 0,
+  VG_NOTIFY_ESCALATE,
+  VG_NOTIFY_CLOSED
+} vg_notify_kind_t;
+
+typedef struct
+{
+  vg_notify_kind_t kind;
+  vg_state_t       state;
+  vg_safety_event_t evt;
+} vg_notify_item_t;
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
+
+#define VG_NOTIFY_CHANGED_CAP 64
+#define VG_NOTIFY_URGENT_CAP  16
 
 static vg_track_t g_tracks[VG_EVT_TYPE_MAX];
 static vg_sm_cb_t g_cb;
 static uint32_t   g_seq;
 static bool       g_inited;
+static vg_notify_item_t g_changed_queue[VG_NOTIFY_CHANGED_CAP];
+static vg_notify_item_t g_urgent_queue[VG_NOTIFY_URGENT_CAP];
+static uint32_t g_changed_head;
+static uint32_t g_changed_tail;
+static uint32_t g_changed_count;
+static uint32_t g_urgent_head;
+static uint32_t g_urgent_tail;
+static uint32_t g_urgent_count;
+static uint32_t g_notify_dropped;
+static bool     g_dispatching;
 
 /* 保护 g_tracks[] 的并发访问：守护线程 feed/tick 与 NSH 命令 sim/ack/top 并发。
  * 使用递归锁，因为 vg_sm_init 内部调用 vg_sm_set_callbacks 会重入。
@@ -59,35 +86,168 @@ static pthread_mutex_t g_sm_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
  * Private Functions
  ****************************************************************************/
 
-static void vg_notify_changed(vg_track_t *t)
+static int vg_notify_push_locked(vg_notify_kind_t kind,
+                                 const vg_track_t *t)
 {
-  if (t->materialized)
+  vg_notify_item_t *queue;
+  uint32_t *tail;
+  uint32_t *count;
+  uint32_t capacity;
+
+  if (t == NULL || !t->materialized)
     {
-      vg_event_log_put(&t->evt);
+      return -1;
     }
 
-  if (g_cb.on_event_changed != NULL && t->materialized)
+  if (kind == VG_NOTIFY_CHANGED)
     {
-      g_cb.on_event_changed(&t->evt, t->state, g_cb.arg);
+      queue = g_changed_queue;
+      tail = &g_changed_tail;
+      count = &g_changed_count;
+      capacity = VG_NOTIFY_CHANGED_CAP;
+    }
+  else
+    {
+      queue = g_urgent_queue;
+      tail = &g_urgent_tail;
+      count = &g_urgent_count;
+      capacity = VG_NOTIFY_URGENT_CAP;
+    }
+
+  if (*count >= capacity)
+    {
+      g_notify_dropped++;
+      return -1;
+    }
+
+  queue[*tail].kind = kind;
+  queue[*tail].state = t->state;
+  queue[*tail].evt = t->evt;
+  *tail = (*tail + 1) % capacity;
+  (*count)++;
+  return 0;
+}
+
+static void vg_notify_changed(vg_track_t *t)
+{
+  if (t != NULL && t->materialized)
+    {
+      if (t->evt.event_revision == 0)
+        {
+          t->evt.event_revision = 1;
+        }
+      else
+        {
+          t->evt.event_revision++;
+        }
+
+      vg_notify_push_locked(VG_NOTIFY_CHANGED, t);
     }
 }
 
 static void vg_notify_escalate(vg_track_t *t)
 {
-  if (g_cb.on_escalate != NULL)
+  if (t != NULL && t->materialized)
     {
-      g_cb.on_escalate(&t->evt, g_cb.arg);
+      /* 升级是独立生命周期修订，即使前一条事件快照还在发送队列中也不能
+       * 覆盖它。 */
+      t->evt.event_revision++;
+      t->notified = true;
+      vg_notify_push_locked(VG_NOTIFY_ESCALATE, t);
     }
-
-  t->notified = true;
 }
 
 static void vg_notify_closed(vg_track_t *t)
 {
-  if (g_cb.on_closed != NULL && t->materialized)
+  if (t != NULL && t->materialized)
     {
-      g_cb.on_closed(&t->evt, g_cb.arg);
+      vg_notify_push_locked(VG_NOTIFY_CLOSED, t);
     }
+}
+
+void vg_sm_dispatch(void)
+{
+  vg_notify_item_t item;
+  vg_sm_cb_t cb;
+  bool have_item;
+
+  pthread_mutex_lock(&g_sm_lock);
+  if (g_dispatching)
+    {
+      pthread_mutex_unlock(&g_sm_lock);
+      return;
+    }
+
+  g_dispatching = true;
+  pthread_mutex_unlock(&g_sm_lock);
+
+  for (;;)
+    {
+      pthread_mutex_lock(&g_sm_lock);
+      memset(&item, 0, sizeof(item));
+      if (g_urgent_count > 0)
+        {
+          item = g_urgent_queue[g_urgent_head];
+          g_urgent_head = (g_urgent_head + 1) % VG_NOTIFY_URGENT_CAP;
+          g_urgent_count--;
+          have_item = true;
+        }
+      else if (g_changed_count > 0)
+        {
+          item = g_changed_queue[g_changed_head];
+          g_changed_head = (g_changed_head + 1) % VG_NOTIFY_CHANGED_CAP;
+          g_changed_count--;
+          have_item = true;
+        }
+      else
+        {
+          have_item = false;
+        }
+
+      cb = g_cb;
+      pthread_mutex_unlock(&g_sm_lock);
+
+      if (!have_item)
+        {
+          break;
+        }
+
+      /* 文件写入和外部回调都在状态机锁外执行。 */
+      if (item.kind == VG_NOTIFY_CHANGED)
+        {
+          vg_event_log_put(&item.evt);
+          if (cb.on_event_changed != NULL)
+            {
+              cb.on_event_changed(&item.evt, item.state, cb.arg);
+            }
+        }
+      else if (item.kind == VG_NOTIFY_ESCALATE)
+        {
+          vg_event_log_put(&item.evt);
+          if (cb.on_escalate != NULL)
+            {
+              cb.on_escalate(&item.evt, cb.arg);
+            }
+        }
+      else if (cb.on_closed != NULL)
+        {
+          cb.on_closed(&item.evt, cb.arg);
+        }
+    }
+
+  pthread_mutex_lock(&g_sm_lock);
+  g_dispatching = false;
+  pthread_mutex_unlock(&g_sm_lock);
+}
+
+uint32_t vg_sm_notify_dropped(void)
+{
+  uint32_t dropped;
+
+  pthread_mutex_lock(&g_sm_lock);
+  dropped = g_notify_dropped;
+  pthread_mutex_unlock(&g_sm_lock);
+  return dropped;
 }
 
 /* 生成事件摘要（结构化描述，绝不含原始音频或对话文本） */
@@ -368,6 +528,15 @@ void vg_sm_init(const vg_sm_cb_t *cb)
   pthread_mutex_lock(&g_sm_lock);
   vg_sm_set_callbacks(cb);
   memset(g_tracks, 0, sizeof(g_tracks));
+  memset(g_changed_queue, 0, sizeof(g_changed_queue));
+  memset(g_urgent_queue, 0, sizeof(g_urgent_queue));
+  g_changed_head = 0;
+  g_changed_tail = 0;
+  g_changed_count = 0;
+  g_urgent_head = 0;
+  g_urgent_tail = 0;
+  g_urgent_count = 0;
+  g_notify_dropped = 0;
   g_seq = vg_event_log_total();
   pthread_mutex_unlock(&g_sm_lock);
 }
@@ -376,6 +545,12 @@ void vg_sm_reset(void)
 {
   pthread_mutex_lock(&g_sm_lock);
   memset(g_tracks, 0, sizeof(g_tracks));
+  g_changed_head = 0;
+  g_changed_tail = 0;
+  g_changed_count = 0;
+  g_urgent_head = 0;
+  g_urgent_tail = 0;
+  g_urgent_count = 0;
   g_seq = vg_event_log_total();
   pthread_mutex_unlock(&g_sm_lock);
 }
@@ -496,6 +671,7 @@ void vg_sm_feed_sound(const vg_sound_obs_t *obs)
     }
 
   pthread_mutex_unlock(&g_sm_lock);
+  vg_sm_dispatch();
 }
 
 void vg_sm_feed_distress(const vg_distress_obs_t *obs)
@@ -618,6 +794,7 @@ void vg_sm_feed_distress(const vg_distress_obs_t *obs)
     }
 
   pthread_mutex_unlock(&g_sm_lock);
+  vg_sm_dispatch();
 }
 
 void vg_sm_tick(void)
@@ -729,6 +906,7 @@ void vg_sm_tick(void)
     }
 
   pthread_mutex_unlock(&g_sm_lock);
+  vg_sm_dispatch();
 }
 
 int vg_sm_ack(const char *event_id, vg_local_status_t action)
@@ -800,6 +978,7 @@ int vg_sm_ack(const char *event_id, vg_local_status_t action)
     }
 
   pthread_mutex_unlock(&g_sm_lock);
+  vg_sm_dispatch();
   return ret;
 }
 

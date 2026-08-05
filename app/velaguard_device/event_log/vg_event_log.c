@@ -20,8 +20,9 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define VG_LOG_MAGIC    0x56474c31u  /* "VGL1" */
-#define VG_LOG_VERSION  1
+#define VG_LOG_MAGIC       0x56474c32u  /* "VGL2" */
+#define VG_LOG_SLOT_MAGIC  0x56534c31u  /* "VSL1" */
+#define VG_LOG_VERSION     2
 
 /****************************************************************************
  * Private Types
@@ -35,7 +36,17 @@ typedef struct
   uint32_t head;      /* 下一个写入槽位 */
   uint32_t count;     /* 当前有效条数 */
   uint32_t total;     /* 累计写入条数 */
+  uint32_t generation; /* 每次头部提交递增 */
+  uint32_t crc32;
 } vg_log_header_t;
+
+typedef struct
+{
+  uint32_t magic;
+  uint32_t sequence;
+  vg_safety_event_t event;
+  uint32_t crc32;
+} vg_log_slot_disk_t;
 
 /****************************************************************************
  * Private Data
@@ -58,7 +69,88 @@ static bool              g_ready = false;
 static off_t vg_slot_offset(uint32_t slot)
 {
   return (off_t)sizeof(vg_log_header_t) +
-         (off_t)slot * (off_t)sizeof(vg_safety_event_t);
+         (off_t)slot * (off_t)sizeof(vg_log_slot_disk_t);
+}
+
+static uint32_t vg_crc32_update(uint32_t crc, const void *data, size_t len)
+{
+  const unsigned char *p = (const unsigned char *)data;
+  size_t i;
+
+  for (i = 0; i < len; i++)
+    {
+      unsigned int bit;
+
+      crc ^= p[i];
+      for (bit = 0; bit < 8; bit++)
+        {
+          crc = (crc >> 1) ^
+                (0xedb88320u & (uint32_t)-(int)(crc & 1));
+        }
+    }
+
+  return crc;
+}
+
+static uint32_t vg_crc32(const void *data, size_t len)
+{
+  return ~vg_crc32_update(0xffffffffu, data, len);
+}
+
+static bool vg_header_valid(const vg_log_header_t *header)
+{
+  vg_log_header_t copy;
+  uint32_t saved;
+
+  if (header == NULL || header->magic != VG_LOG_MAGIC ||
+      header->version != VG_LOG_VERSION ||
+      header->capacity != VG_EVENT_LOG_CAPACITY ||
+      header->head >= VG_EVENT_LOG_CAPACITY ||
+      header->count > VG_EVENT_LOG_CAPACITY)
+    {
+      return false;
+    }
+
+  copy = *header;
+  saved = copy.crc32;
+  copy.crc32 = 0;
+  return saved == vg_crc32(&copy, sizeof(copy));
+}
+
+static bool vg_slot_valid(vg_log_slot_disk_t *slot)
+{
+  uint32_t saved;
+  bool valid;
+
+  if (slot == NULL || slot->magic != VG_LOG_SLOT_MAGIC ||
+      vg_event_validate(&slot->event) != 0)
+    {
+      return false;
+    }
+
+  saved = slot->crc32;
+  slot->crc32 = 0;
+  valid = saved == vg_crc32(slot, sizeof(*slot));
+  slot->crc32 = saved;
+  return valid;
+}
+
+static bool vg_slot_is_active(uint32_t head, uint32_t count, uint32_t slot)
+{
+  uint32_t first;
+
+  if (count >= VG_EVENT_LOG_CAPACITY)
+    {
+      return true;
+    }
+
+  first = (head + VG_EVENT_LOG_CAPACITY - count) % VG_EVENT_LOG_CAPACITY;
+  if (first + count <= VG_EVENT_LOG_CAPACITY)
+    {
+      return slot >= first && slot < first + count;
+    }
+
+  return slot >= first || slot < (first + count) % VG_EVENT_LOG_CAPACITY;
 }
 
 /* 打开日志文件，失败返回 -1（此时降级为纯内存日志，本地告警不受影响） */
@@ -73,6 +165,54 @@ static int vg_log_open(int flags)
   return open(g_log_path, flags, 0644);
 }
 
+static int vg_write_all(int fd, const void *buf, size_t len)
+{
+  const unsigned char *p = (const unsigned char *)buf;
+  size_t written = 0;
+
+  while (written < len)
+    {
+      ssize_t n = write(fd, p + written, len - written);
+      if (n < 0 && errno == EINTR)
+        {
+          continue;
+        }
+
+      if (n <= 0)
+        {
+          return -1;
+        }
+
+      written += (size_t)n;
+    }
+
+  return 0;
+}
+
+static int vg_read_all(int fd, void *buf, size_t len)
+{
+  unsigned char *p = (unsigned char *)buf;
+  size_t read_len = 0;
+
+  while (read_len < len)
+    {
+      ssize_t n = read(fd, p + read_len, len - read_len);
+      if (n < 0 && errno == EINTR)
+        {
+          continue;
+        }
+
+      if (n <= 0)
+        {
+          return -1;
+        }
+
+      read_len += (size_t)n;
+    }
+
+  return 0;
+}
+
 static int vg_write_at(off_t off, const void *buf, size_t len)
 {
   int fd = vg_log_open(O_WRONLY | O_CREAT);
@@ -83,8 +223,7 @@ static int vg_write_at(off_t off, const void *buf, size_t len)
       return -1;
     }
 
-  if (lseek(fd, off, SEEK_SET) >= 0 &&
-      write(fd, buf, len) == (ssize_t)len)
+  if (lseek(fd, off, SEEK_SET) >= 0 && vg_write_all(fd, buf, len) == 0)
     {
       fsync(fd);
       ret = 0;
@@ -94,20 +233,36 @@ static int vg_write_at(off_t off, const void *buf, size_t len)
   return ret;
 }
 
-static int vg_write_header(void)
+static int vg_write_header(const vg_log_header_t *header)
 {
-  return vg_write_at(0, &g_hdr, sizeof(g_hdr));
+  vg_log_header_t copy;
+
+  if (header == NULL)
+    {
+      return -1;
+    }
+
+  copy = *header;
+  copy.crc32 = 0;
+  copy.crc32 = vg_crc32(&copy, sizeof(copy));
+  return vg_write_at(0, &copy, sizeof(copy));
 }
 
 static int vg_write_slot(uint32_t slot)
 {
+  vg_log_slot_disk_t disk;
+
   if (slot >= VG_EVENT_LOG_CAPACITY)
     {
       return -1;
     }
 
-  return vg_write_at(vg_slot_offset(slot), &g_slots[slot],
-                     sizeof(vg_safety_event_t));
+  memset(&disk, 0, sizeof(disk));
+  disk.magic = VG_LOG_SLOT_MAGIC;
+  disk.sequence = g_hdr.total;
+  disk.event = g_slots[slot];
+  disk.crc32 = vg_crc32(&disk, sizeof(disk));
+  return vg_write_at(vg_slot_offset(slot), &disk, sizeof(disk));
 }
 
 static void vg_reset_state(void)
@@ -172,6 +327,9 @@ int vg_event_log_init(const char *dir)
 {
   const char *base = (dir != NULL) ? dir : vg_config()->data_dir;
   vg_log_header_t disk;
+  vg_log_slot_disk_t slot_disk;
+  bool valid = true;
+  uint32_t slot;
   int fd;
 
   vg_reset_state();
@@ -185,7 +343,7 @@ int vg_event_log_init(const char *dir)
       /* 首次运行：创建文件并写入空头部 */
 
       vg_reset_state();
-      if (vg_write_header() < 0)
+      if (vg_write_header(&g_hdr) < 0)
         {
           /* 存储不可用时降级为纯内存日志，本地提醒能力不受影响 */
 
@@ -198,33 +356,54 @@ int vg_event_log_init(const char *dir)
       return 0;
     }
 
-  if (read(fd, &disk, sizeof(disk)) == (ssize_t)sizeof(disk) &&
-      disk.magic == VG_LOG_MAGIC && disk.version == VG_LOG_VERSION &&
-      disk.capacity == VG_EVENT_LOG_CAPACITY &&
-      disk.head < VG_EVENT_LOG_CAPACITY &&
-      disk.count <= VG_EVENT_LOG_CAPACITY)
+  if (vg_read_all(fd, &disk, sizeof(disk)) == 0 &&
+      vg_header_valid(&disk) &&
+      lseek(fd, vg_slot_offset(0), SEEK_SET) >= 0)
     {
       g_hdr = disk;
-      if (lseek(fd, vg_slot_offset(0), SEEK_SET) < 0 ||
-          read(fd, g_slots, sizeof(g_slots)) < 0)
+      memset(g_slots, 0, sizeof(g_slots));
+      for (slot = 0; slot < VG_EVENT_LOG_CAPACITY; slot++)
         {
-          memset(g_slots, 0, sizeof(g_slots));
+          if (!vg_slot_is_active(g_hdr.head, g_hdr.count, slot))
+            {
+              continue;
+            }
+
+          if (lseek(fd, vg_slot_offset(slot), SEEK_SET) < 0 ||
+              vg_read_all(fd, &slot_disk, sizeof(slot_disk)) < 0)
+            {
+              valid = false;
+              break;
+            }
+
+          if (!vg_slot_valid(&slot_disk))
+            {
+              valid = false;
+              break;
+            }
+
+          g_slots[slot] = slot_disk.event;
         }
 
       close(fd);
     }
   else
     {
+      valid = false;
+      close(fd);
+    }
+
+  if (!valid)
+    {
       /* 新建或损坏：重建文件 */
 
-      close(fd);
       if (truncate(g_log_path, 0) < 0)
         {
           fprintf(stderr, "[velaguard] 事件日志重建失败\n");
         }
 
       vg_reset_state();
-      vg_write_header();
+      vg_write_header(&g_hdr);
     }
 
   g_ready = true;
@@ -238,6 +417,8 @@ void vg_event_log_deinit(void)
 
 int vg_event_log_append(const vg_safety_event_t *evt)
 {
+  vg_log_header_t next;
+  vg_safety_event_t old_event;
   uint32_t slot;
 
   if (!g_ready || evt == NULL || vg_event_validate(evt) != 0)
@@ -246,23 +427,32 @@ int vg_event_log_append(const vg_safety_event_t *evt)
     }
 
   slot = g_hdr.head;
+  old_event = g_slots[slot];
   g_slots[slot] = *evt;
 
-  g_hdr.head = (g_hdr.head + 1) % VG_EVENT_LOG_CAPACITY;
-  if (g_hdr.count < VG_EVENT_LOG_CAPACITY)
+  next = g_hdr;
+  next.head = (next.head + 1) % VG_EVENT_LOG_CAPACITY;
+  if (next.count < VG_EVENT_LOG_CAPACITY)
     {
-      g_hdr.count++;
+      next.count++;
     }
 
-  g_hdr.total++;
+  next.total++;
+  next.generation++;
 
-  vg_write_slot(slot);
-  vg_write_header();
+  if (vg_write_slot(slot) < 0 || vg_write_header(&next) < 0)
+    {
+      g_slots[slot] = old_event;
+      return -1;
+    }
+
+  g_hdr = next;
   return 0;
 }
 
 int vg_event_log_update(const vg_safety_event_t *evt)
 {
+  vg_safety_event_t old_event;
   uint32_t slot;
 
   if (!g_ready || evt == NULL)
@@ -275,8 +465,14 @@ int vg_event_log_update(const vg_safety_event_t *evt)
       return -1;
     }
 
+  old_event = g_slots[slot];
   g_slots[slot] = *evt;
-  vg_write_slot(slot);
+  if (vg_write_slot(slot) < 0)
+    {
+      g_slots[slot] = old_event;
+      return -1;
+    }
+
   return 0;
 }
 
@@ -328,6 +524,10 @@ int vg_event_log_find(const char *event_id, vg_safety_event_t *out)
 
 int vg_event_log_clear(void)
 {
+  vg_log_header_t old_header = g_hdr;
+  vg_safety_event_t old_slots[VG_EVENT_LOG_CAPACITY];
+
+  memcpy(old_slots, g_slots, sizeof(old_slots));
   vg_reset_state();
 
   if (g_log_path[0] != '\0' && truncate(g_log_path, 0) < 0)
@@ -335,7 +535,13 @@ int vg_event_log_clear(void)
       fprintf(stderr, "[velaguard] 事件日志清空失败\n");
     }
 
-  vg_write_header();
+  if (vg_write_header(&g_hdr) < 0)
+    {
+      g_hdr = old_header;
+      memcpy(g_slots, old_slots, sizeof(g_slots));
+      return -1;
+    }
+
   return 0;
 }
 

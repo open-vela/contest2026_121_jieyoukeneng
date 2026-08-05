@@ -673,6 +673,9 @@ int main(int argc, char *argv[])
 
           vg_uploader_enqueue_advice(&evt, evt.upload_reason,
                                      advice[0] != '\0' ? advice : NULL);
+          /* NSH 单次命令没有守护循环，由命令 owner 显式触发一次网络任务；
+           * 状态机回调本身不会走到这里，也不会同步联网。 */
+          vg_uploader_flush();
           printf("已入队，待发送 %d 条\n", vg_uploader_pending());
           return 0;
         }
@@ -692,6 +695,7 @@ int main(int argc, char *argv[])
                "通知链路测试事件（非真实告警）");
 
       vg_uploader_enqueue(&evt, VG_UPLOAD_MANUAL_TEST);
+      vg_uploader_flush();
       printf("测试通知已入队，待发送 %d 条\n", vg_uploader_pending());
       return 0;
     }
@@ -1068,6 +1072,8 @@ static int vg_cmd_selftest(void)
     vg_safety_event_t a;
     vg_safety_event_t b;
     char json[768];
+    vg_event_envelope_t envelope;
+    char envelope_json[2048];
 
     memset(&a, 0, sizeof(a));
     snprintf(a.event_id, sizeof(a.event_id), "evt_001");
@@ -1096,6 +1102,16 @@ static int vg_cmd_selftest(void)
              strcmp(b.matched_phrase, a.matched_phrase) == 0,
              "解析结果不一致");
     printf("       JSON: %s\n", json);
+
+    vg_check("event.v1 envelope 含 advice 且可回读",
+             vg_event_envelope_to_json(&a, "请电话确认现场情况",
+                                       "msg_selftest_1", "b0001abcd", 1,
+                                       1, "trace_selftest_1", 1234,
+                                       envelope_json, sizeof(envelope_json)) > 0 &&
+             strstr(envelope_json, "\"advice\":") != NULL &&
+             vg_event_envelope_from_json(envelope_json, &envelope) == 0 &&
+             strcmp(envelope.advice, "请电话确认现场情况") == 0,
+             "envelope 序列化或解析失败");
   }
 
   vg_sm_reset();

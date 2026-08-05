@@ -84,6 +84,15 @@ int vg_sm_ack(const char *event_id, vg_local_status_t action);
 
 int vg_sm_active_count(void);
 
+/* 将锁内复制的事件快照在锁外分发给 UI、日志和上传适配器。守护任务可在
+ * feed/tick 后显式调用；当前实现也会在各公共输入函数返回前自动分发。 */
+
+void vg_sm_dispatch(void);
+
+/* 通知队列溢出计数，供 status/metrics 读取。 */
+
+uint32_t vg_sm_notify_dropped(void);
+
 /* 取最高优先级的活跃事件（PRD-03 并发仲裁）。无活跃事件返回 -1。 */
 
 int vg_sm_top(vg_track_view_t *out);

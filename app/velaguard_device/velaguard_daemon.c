@@ -221,14 +221,16 @@ int vg_daemon_init(void)
 
   vg_notifier_init();
 
-  if (vg_agent_init() < 0)
-    {
-      goto err_agent;
-    }
+  /* Agent/LLM 是增强能力，不得阻断本地状态机与模板通知。缺失 Skill、
+   * 网络不可用或模型失败时由 notifier 使用端侧模板继续运行。 */
+
+  (void)vg_agent_init();
+
+  /* 网络/存储上传器是降级能力，初始化失败不能阻断本地安全闭环。 */
 
   if (vg_uploader_init() < 0)
     {
-      goto err_uploader;
+      fprintf(stderr, "[velaguard] 上传器不可用，本地告警继续运行\n");
     }
 
   if (vg_detector_init() < 0)
@@ -289,8 +291,6 @@ err_indicator:
   vg_detector_deinit();
 err_detector:
   vg_uploader_deinit();
-err_uploader:
-err_agent:
   vg_enroll_deinit();
 err_enroll:
   vg_event_log_deinit();

@@ -48,6 +48,11 @@ bool vg_uploader_online(void);
 
 void vg_uploader_stats(uint32_t *sent, uint32_t *failed);
 
+uint32_t vg_uploader_dropped(void);
+uint32_t vg_uploader_dead_letter(void);
+uint32_t vg_uploader_storage_errors(void);
+bool     vg_uploader_storage_saturated(void);
+
 /* 强制立即尝试一次（演示用） */
 
 void vg_uploader_flush(void);

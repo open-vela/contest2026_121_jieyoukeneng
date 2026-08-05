@@ -40,6 +40,9 @@ const iso = (offsetSec = 0) => {
 
 let seq = Date.now() % 100000;
 const nextId = () => `sim_${(seq++).toString().padStart(6, '0')}`;
+const DEVICE_EPOCH = 'sim_epoch_001';
+let deviceSeq = 0;
+const wireState = new Map();
 
 function evt(fields) {
   return {
@@ -178,10 +181,35 @@ const SCENARIOS = [
 ];
 
 async function post(payload) {
+  const serialized = JSON.stringify(payload);
+  let state = wireState.get(payload.eventId);
+  if (!state || state.serialized !== serialized) {
+    state = {
+      serialized,
+      eventRevision: (state?.eventRevision || 0) + 1,
+      deviceSeq: ++deviceSeq,
+    };
+    wireState.set(payload.eventId, state);
+  }
+  const envelope = {
+    protocol: 'velaguard',
+    schema: 'event.v1',
+    messageType: 'event.upsert',
+    messageId: `sim_msg_${payload.eventId}_${state.eventRevision}`,
+    deviceId: payload.deviceId,
+    deviceEpoch: DEVICE_EPOCH,
+    deviceSeq: state.deviceSeq,
+    eventId: payload.eventId,
+    eventRevision: state.eventRevision,
+    sentAt: new Date().toISOString(),
+    monotonicMs: Date.now(),
+    traceId: `sim_trace_${payload.eventId}_${state.eventRevision}`,
+    payload,
+  };
   const res = await fetch(`${baseUrl}/events`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(envelope),
   });
   const body = await res.json().catch(() => ({}));
   const flag = body.duplicated ? '幂等更新' : '新建';
@@ -189,8 +217,8 @@ async function post(payload) {
     console.error(`  ✗ ${payload.eventId} 被拒绝: ${(body.errors || []).join('; ')}`);
     return null;
   }
-  console.log(`  ✓ ${payload.eventId} ${payload.eventType}/${payload.level}` +
-              `/${payload.localStatus} (${flag})`);
+  console.log(`  ✓ ${payload.eventId} r${state.eventRevision} ` +
+              `${payload.eventType}/${payload.level}/${payload.localStatus} (${flag})`);
   return body.event;
 }
 

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velaguard.local/protocol/command.v1.schema.json",
+  "title": "VelaGuard command.v1 envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "commandId", "targetDeviceId", "commandType", "issuedAt",
+    "expiresAt", "desiredRevision", "nonce", "args", "alg", "keyId",
+    "signature"
+  ],
+  "properties": {
+    "schema": { "const": "command.v1" },
+    "commandId": { "$ref": "#/$defs/id64" },
+    "targetDeviceId": { "$ref": "#/$defs/id32" },
+    "commandType": {
+      "enum": ["event.action", "config.prepare", "config.commit",
+               "config.rollback", "ota.prepare", "ota.commit",
+               "ota.rollback", "time.sync", "diagnostic.get"]
+    },
+    "issuedAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "expiresAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "desiredRevision": { "type": "integer", "minimum": 1 },
+    "nonce": { "$ref": "#/$defs/id96" },
+    "args": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventId": { "$ref": "#/$defs/id40" },
+        "action": { "enum": ["handled", "false_alarm", "snooze"] }
+      }
+    },
+    "alg": { "enum": ["hmac-sha256", "demo.none"] },
+    "keyId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "signature": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "$defs": {
+    "id32": {
+      "type": "string", "minLength": 1, "maxLength": 32,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "id40": {
+      "type": "string", "minLength": 1, "maxLength": 40,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "id64": {
+      "type": "string", "minLength": 1, "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    },
+    "id96": {
+      "type": "string", "minLength": 1, "maxLength": 96,
+      "pattern": "^[A-Za-z0-9_.-]+$"
+    }
+  }
+}
