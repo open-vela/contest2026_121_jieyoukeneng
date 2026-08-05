@@ -216,8 +216,10 @@ velaguard status
 `commandReceipt`，再提交 `commandResult`。紧急事件的「已处理/误报」在设备本地确认
 前只能显示「待本地确认」，紧急事件禁止远程 `snooze`。
 
-演示配置可以使用 `consoleTls:false` 的局域网 HTTP；生产配置必须启用 TLS/mTLS、
-设备认证和命令签名。当前固件在 TLS 能力未接入前会拒绝 `consoleTls:true`，绝不回退到明文。
+演示配置可以使用 `consoleTls:false` 的局域网 HTTP；Gemini-S1 固件的
+`consoleTls:true` 已由 libcurl + mbedTLS 适配器承载，会校验 CA、服务端名称和可选
+mTLS 证书，TLS 失败绝不回退到明文。生产配置仍必须使用真实证书、安全存储、可信时间
+和命令签名；当前仅完成编译接入，实板握手与证书生命周期测试待执行。
 
 ### A4.7 断网补发幂等
 

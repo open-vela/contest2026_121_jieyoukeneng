@@ -741,29 +741,11 @@ static vg_send_result_t vg_try_send(vg_upload_item_t *item, int *error)
   int status = 0;
   int ret;
 
-  if (cfg->console_tls)
-    {
-      if (error != NULL)
-        {
-          *error = VG_TRANSPORT_ERR_TLS_UNAVAILABLE;
-        }
-      return VG_SEND_PERMANENT;
-    }
-
-  if (!cfg->demo_mode)
-    {
-      if (error != NULL)
-        {
-          *error = -100;
-        }
-      return VG_SEND_PERMANENT;
-    }
-
-  /* https 地址在当前演示实现中明确拒绝，避免把明文 socket 冒充 TLS。 */
   ret = vg_transport_post_json(cfg->console_host, cfg->console_port,
-                               cfg->console_path, false,
+                               cfg->console_path, cfg->console_tls,
                                cfg->console_server_name,
-                               cfg->console_ca_path, item->payload,
+                               cfg->console_ca_path, cfg->device_cert_path,
+                               cfg->device_key_path, item->payload,
                                item->message_id,
                                cfg->device_token[0] != '\0' ?
                                cfg->device_token : NULL,

@@ -8,6 +8,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef __NuttX__
+#  include <nuttx/audio/audio.h>
+#  include "system/nxplayer.h"
+#endif
+
 #include "velaguard/vg_capture.h"
 #include "velaguard/vg_indicator.h"
 #include "velaguard/vg_time.h"
@@ -18,6 +23,10 @@
 
 #ifndef CONFIG_VELAGUARD_TONE_DIR
 #  define CONFIG_VELAGUARD_TONE_DIR "/data/velaguard/tones"
+#endif
+
+#ifndef CONFIG_VELAGUARD_AUDIO_OUT_DEVICE
+#  define CONFIG_VELAGUARD_AUDIO_OUT_DEVICE "/dev/audio/pcm0p"
 #endif
 
 /****************************************************************************
@@ -81,11 +90,16 @@ int vg_indicator_init(void)
              CONFIG_VELAGUARD_LED_DEVICE);
     }
 
-  g_has_audio_out = (stat(CONFIG_VELAGUARD_TONE_DIR, &st) == 0);
+  g_has_audio_out = (stat(CONFIG_VELAGUARD_AUDIO_OUT_DEVICE, &st) == 0);
   if (!g_has_audio_out)
     {
-      printf("[velaguard] 未检测到提示音资源(%s)，降级为控制台指示\n",
-             CONFIG_VELAGUARD_TONE_DIR);
+      printf("[velaguard] 未检测到扬声器设备(%s)，降级为控制台指示\n",
+             CONFIG_VELAGUARD_AUDIO_OUT_DEVICE);
+    }
+  else
+    {
+      printf("[velaguard] 扬声器设备已就绪(%s)\n",
+             CONFIG_VELAGUARD_AUDIO_OUT_DEVICE);
     }
 
   vg_indicator_set_led(VG_LED_GUARD);
@@ -122,24 +136,28 @@ vg_led_mode_t vg_indicator_led(void)
 
 void vg_indicator_play(vg_level_t level)
 {
-  const char *tone;
   uint32_t duration_ms;
+  uint32_t duration_sec;
+  uint32_t pitch_hz;
 
   switch (level)
     {
       case VG_LEVEL_WARNING:
-        tone = "warning.wav";
         duration_ms = 1200;
+        duration_sec = 2;
+        pitch_hz = 880;
         break;
 
       case VG_LEVEL_EMERGENCY:
-        tone = "emergency.wav";
         duration_ms = 1800;
+        duration_sec = 2;
+        pitch_hz = 1200;
         break;
 
       default:
-        tone = "notice.wav";
-        duration_ms = 400;
+        duration_ms = 1000;
+        duration_sec = 1;
+        pitch_hz = 660;
         break;
     }
 
@@ -154,16 +172,46 @@ void vg_indicator_play(vg_level_t level)
 
   if (g_has_audio_out)
     {
-      char path[128];
+#ifdef __NuttX__
+      struct nxplayer_s *player;
+      int ret;
 
-      snprintf(path, sizeof(path), "%s/%s", CONFIG_VELAGUARD_TONE_DIR, tone);
-
-      /* 交给官方 media 播放接口；这里保持与平台解耦，
-       * 实机接入时替换为 media_uv_player / nxplayer 调用。
+      /* 使用 openvela 已启用的 NxPlayer 生成纯音，不依赖 /data 中的音频
+       * 文件，也不会把原始录音落盘。提示音按整秒播放，采集让路仍按
+       * 毫秒预算执行。
        */
 
-      printf("[velaguard] 播放提示音 %s（%s）\n",
-             path, g_full_duplex ? "录放并发" : "时分让路");
+      player = nxplayer_create();
+      if (player == NULL)
+        {
+          printf("[velaguard] 创建提示音播放器失败，降级为控制台提示\n");
+          return;
+        }
+
+      ret = nxplayer_setdevice(player, CONFIG_VELAGUARD_AUDIO_OUT_DEVICE);
+      if (ret == 0)
+        {
+          ret = nxplayer_playtone(player, 16000, pitch_hz, duration_sec);
+        }
+
+      /* NxPlayer 的播放线程会持有自己的引用，释放调用方引用即可。 */
+
+      nxplayer_release(player);
+      if (ret < 0)
+        {
+          printf("[velaguard] 提示音播放失败(%d)，继续本地告警\n", ret);
+        }
+      else
+        {
+          printf("[velaguard] 已播放 %s 级提示音（%s）\n",
+                 vg_level_cn(level), g_full_duplex ? "录放并发" : "时分让路");
+        }
+#else
+      (void)duration_sec;
+      (void)pitch_hz;
+      printf("[velaguard] 播放 %s 级提示音（主机线无扬声器，%s）\n",
+             vg_level_cn(level), g_full_duplex ? "录放并发" : "时分让路");
+#endif
     }
   else
     {

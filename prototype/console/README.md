@@ -92,5 +92,7 @@ export VELAGUARD_CONSOLE_PORT=8080
 控制台**不承担端侧安全判断**：它只消费结构化摘要，不能反向接管设备的
 告警决策。控制台、Agent、LLM 全部不可用时，端侧本地识别、提醒、确认与
 事件日志仍然完整工作（`tests/run_tests.sh` 第 5 节覆盖了这条）。当前 demo
-transport 只有明文 HTTP；设备配置 `consoleTls=true` 会被端侧传输安全门拒绝，
-不会静默回退到明文。生产 TLS/mTLS、设备密钥和命令验证需要通过协议目录中的能力门。
+演示 transport 使用明文 HTTP；设备配置 `consoleTls=true` 时，Gemini-S1
+固件改走板端 libcurl + mbedTLS，并校验 CA、服务端名称和 mTLS 客户端证书。
+生产仍需完成设备密钥安全存储、配置签名和实板证书轮换验收，任何 TLS 失败
+都只影响同步，不会回退到明文或阻断本地告警。
