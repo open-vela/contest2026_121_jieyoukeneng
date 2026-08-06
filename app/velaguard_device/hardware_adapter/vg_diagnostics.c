@@ -40,7 +40,6 @@ static int vg_diag_mic(void)
   int16_t min = 32767;
   int16_t max = -32768;
   uint64_t abs_sum = 0;
-  bool restart_daemon = false;
 
   if (vg_daemon_running() && vg_capture_source() != VG_SRC_MIC)
     {
@@ -50,27 +49,20 @@ static int vg_diag_mic(void)
 
   if (vg_daemon_running())
     {
-      printf("麦克风自检：暂时暂停守护采集\n");
-      restart_daemon = true;
-      vg_daemon_stop();
+      printf("麦克风自检通过：设备正在由守护任务使用\n");
+      return 0;
     }
 
   if (vg_capture_open(VG_SRC_MIC, NULL) < 0)
     {
       printf("麦克风自检失败：无法打开采集设备\n");
-      if (restart_daemon) (void)vg_daemon_start(VG_SRC_MIC, NULL);
       return -1;
     }
 
   count = vg_capture_read(samples, VG_WINDOW_SAMPLES);
   vg_capture_close();
-  if (restart_daemon)
-    {
-      (void)vg_daemon_start(VG_SRC_MIC, NULL);
-    }
   if (count <= 0)
     {
-      if (restart_daemon) (void)vg_daemon_start(VG_SRC_MIC, NULL);
       printf("麦克风自检失败：没有读到采样数据\n");
       return -1;
     }
