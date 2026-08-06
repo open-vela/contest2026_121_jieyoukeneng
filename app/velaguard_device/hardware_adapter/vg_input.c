@@ -197,6 +197,18 @@ void vg_input_dispatch(vg_action_t action)
         vg_ui_history_scroll(1);
         break;
 
+      case VG_ACT_TEST_MIC:
+        vg_diagnostics_start(VG_DIAG_MIC);
+        break;
+
+      case VG_ACT_TEST_SPEAKER:
+        vg_diagnostics_start(VG_DIAG_SPEAKER);
+        break;
+
+      case VG_ACT_TEST_NETWORK:
+        vg_diagnostics_start(VG_DIAG_NETWORK);
+        break;
+
       default:
         break;
     }

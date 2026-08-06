@@ -4,9 +4,7 @@
  * 与控制台后端共用同一份页面模型（vg_ui.c），这里只负责把渲染结果
  * 画到 LCD 上，并提供分级配色的状态条。
  *
- * 注意：LVGL 默认字体不含 CJK 字形，因此 LCD 上使用 ASCII 文案
- *（vg_ui_render(..., ascii=true)）；控制台与远程通知使用中文文案。
- * 若后续内置 CJK 子集字体，只需把 ascii 改为 false。
+ * Gemini-S1 固件内置精简中文字体，LCD 与控制台共用中文页面模型。
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -27,6 +25,9 @@
 #include <lvgl/lvgl.h>
 
 #include "velaguard/vg_event_sm.h"
+#include "velaguard/vg_input.h"
+#include "velaguard/vg_time.h"
+#include "velaguard/vg_types.h"
 #include "velaguard/vg_ui.h"
 #include "velaguard/vg_ui_lvgl.h"
 
@@ -34,12 +35,20 @@
  * Private Data
  ****************************************************************************/
 
+#ifndef __NuttX__
 static pthread_t         g_thread;
+#endif
 static pid_t             g_task;
 static volatile bool     g_running;
 static lv_obj_t         *g_label;
+static lv_obj_t         *g_clock;
 static lv_obj_t         *g_bar;
+static lv_obj_t         *g_buttons[4];
+static lv_obj_t         *g_button_labels[4];
+static vg_action_t       g_button_actions[4];
 static lv_nuttx_result_t g_result;
+
+extern const lv_font_t lv_font_simsun_16_cjk;
 
 /****************************************************************************
  * Private Functions
@@ -67,18 +76,108 @@ static uint32_t vg_level_color(void)
     }
 }
 
+static void vg_lvgl_button_event(lv_event_t *event)
+{
+  uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
+
+  if (index < 4)
+    {
+      if (vg_ui_page() == VG_PAGE_HOME && index == 1)
+        {
+          vg_ui_set_page(VG_PAGE_HISTORY);
+        }
+      else if (vg_ui_page() == VG_PAGE_HOME && index == 2)
+        {
+          vg_ui_set_page(VG_PAGE_SETTINGS);
+        }
+      else
+        {
+          vg_input_dispatch(g_button_actions[index]);
+        }
+    }
+}
+
+static void vg_lvgl_set_button(unsigned int index, const char *text,
+                               vg_action_t action)
+{
+  if (index >= 4)
+    {
+      return;
+    }
+
+  g_button_actions[index] = action;
+  lv_label_set_text(g_button_labels[index], text);
+}
+
+static void vg_lvgl_refresh_buttons(void)
+{
+  if (vg_ui_wizard_active())
+    {
+      vg_lvgl_set_button(0, "上一步", VG_ACT_HANDLED);
+      vg_lvgl_set_button(1, "下一项", VG_ACT_PAGE);
+      vg_lvgl_set_button(2, "确认", VG_ACT_ENTER);
+      vg_lvgl_set_button(3, "取消", VG_ACT_BACK);
+      return;
+    }
+
+  switch (vg_ui_page())
+    {
+      case VG_PAGE_EVENT:
+        vg_lvgl_set_button(0, "没事了", VG_ACT_HANDLED);
+        vg_lvgl_set_button(1, "误报", VG_ACT_FALSE_ALARM);
+        vg_lvgl_set_button(2, "稍后提醒", VG_ACT_SNOOZE);
+        vg_lvgl_set_button(3, "返回", VG_ACT_BACK);
+        break;
+
+      case VG_PAGE_HISTORY:
+        vg_lvgl_set_button(0, "上一页", VG_ACT_SCROLL_UP);
+        vg_lvgl_set_button(1, "首页", VG_ACT_BACK);
+        vg_lvgl_set_button(2, "下一页", VG_ACT_SCROLL_DOWN);
+        vg_lvgl_set_button(3, "设置", VG_ACT_PAGE);
+        break;
+
+      case VG_PAGE_SETTINGS:
+        vg_lvgl_set_button(0, "麦克风", VG_ACT_TEST_MIC);
+        vg_lvgl_set_button(1, "扬声器", VG_ACT_TEST_SPEAKER);
+        vg_lvgl_set_button(2, "网络", VG_ACT_TEST_NETWORK);
+        vg_lvgl_set_button(3, "返回", VG_ACT_BACK);
+        break;
+
+      default:
+        vg_lvgl_set_button(0, "事件", VG_ACT_PAGE);
+        vg_lvgl_set_button(1, "历史", VG_ACT_NONE);
+        vg_lvgl_set_button(2, "设置", VG_ACT_NONE);
+        vg_lvgl_set_button(3, "录入", VG_ACT_ENTER);
+        break;
+    }
+}
+
 static void vg_lvgl_refresh(lv_timer_t *timer)
 {
   static char text[1024];
+  char clock_text[48];
+  char time_text[VG_TIMESTR_LEN];
 
   (void)timer;
 
-  if (vg_ui_render(text, sizeof(text), true) > 0)
+  if (vg_ui_render(text, sizeof(text), false) > 0)
     {
       lv_label_set_text(g_label, text);
     }
 
+  vg_format_time(vg_wall_sec(), time_text, sizeof(time_text));
+  if (vg_time_reliable())
+    {
+      snprintf(clock_text, sizeof(clock_text), "现在 %s", time_text + 5);
+    }
+  else
+    {
+      snprintf(clock_text, sizeof(clock_text), "时间未同步");
+    }
+  lv_label_set_text(g_clock, clock_text);
+
   lv_obj_set_style_bg_color(g_bar, lv_color_hex(vg_level_color()), 0);
+  vg_lvgl_refresh_buttons();
 }
 
 static void *vg_lvgl_thread(void *arg)
@@ -122,10 +221,39 @@ static void *vg_lvgl_thread(void *arg)
 
   g_label = lv_label_create(lv_screen_active());
   lv_obj_set_width(g_label, LV_PCT(96));
+  lv_obj_set_height(g_label, 166);
   lv_obj_align(g_label, LV_ALIGN_TOP_LEFT, 6, 16);
   lv_label_set_long_mode(g_label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_font(g_label, &lv_font_simsun_16_cjk, 0);
   lv_obj_set_style_text_color(g_label, lv_color_hex(0xe8eaf0), 0);
-  lv_label_set_text(g_label, "VelaGuard starting...");
+  lv_label_set_text(g_label, "安聆守护正在启动...");
+
+  g_clock = lv_label_create(lv_screen_active());
+  lv_obj_set_width(g_clock, LV_PCT(96));
+  lv_obj_align(g_clock, LV_ALIGN_TOP_RIGHT, -6, 8);
+  lv_obj_set_style_text_align(g_clock, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_style_text_font(g_clock, &lv_font_simsun_16_cjk, 0);
+  lv_obj_set_style_text_color(g_clock, lv_color_hex(0x9fb6c9), 0);
+  lv_label_set_text(g_clock, "时间未同步");
+
+  for (unsigned int i = 0; i < 4; i++)
+    {
+      g_buttons[i] = lv_button_create(lv_screen_active());
+      lv_obj_set_size(g_buttons[i], 76, 40);
+      lv_obj_set_pos(g_buttons[i], 4 + (int)i * 80, 194);
+      lv_obj_set_style_radius(g_buttons[i], 6, 0);
+      lv_obj_set_style_bg_color(g_buttons[i], lv_color_hex(0x28547a), 0);
+      lv_obj_set_style_bg_color(g_buttons[i], lv_color_hex(0x3978a8),
+                                LV_STATE_PRESSED);
+      g_button_labels[i] = lv_label_create(g_buttons[i]);
+      lv_obj_set_style_text_font(g_button_labels[i], &lv_font_simsun_16_cjk, 0);
+      lv_obj_center(g_button_labels[i]);
+      g_button_actions[i] = VG_ACT_NONE;
+      lv_obj_add_event_cb(g_buttons[i], vg_lvgl_button_event,
+                          LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    }
+
+  vg_lvgl_refresh_buttons();
 
   lv_timer_create(vg_lvgl_refresh, 500, NULL);
 

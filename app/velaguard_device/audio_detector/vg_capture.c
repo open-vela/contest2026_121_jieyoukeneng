@@ -4,10 +4,16 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+#include <mqueue.h>
+#include <sys/ioctl.h>
+
+#include <nuttx/audio/audio.h>
 
 #include "velaguard/vg_types.h"
 #include "velaguard/vg_capture.h"
@@ -40,6 +46,17 @@ static FILE       *g_wav;
 static vg_wav_info_t g_wav_info;
 static long        g_wav_pos;
 static int         g_mic_fd = -1;
+static mqd_t       g_mic_mq = (mqd_t)-1;
+static struct ap_buffer_s **g_mic_buffers;
+static unsigned int g_mic_nbuffers;
+static pthread_t    g_mic_thread;
+static volatile bool g_mic_running;
+static pthread_mutex_t g_mic_lock = PTHREAD_MUTEX_INITIALIZER;
+#define VG_MIC_RING_SAMPLES 32768
+static int16_t      g_mic_ring[VG_MIC_RING_SAMPLES];
+static size_t       g_mic_ring_read;
+static size_t       g_mic_ring_write;
+static size_t       g_mic_ring_count;
 static bool        g_paused;
 static char        g_pause_reason[48];
 static uint64_t    g_hold_until_ms;
@@ -47,6 +64,239 @@ static uint64_t    g_hold_until_ms;
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+static void vg_mic_ring_reset(void)
+{
+  pthread_mutex_lock(&g_mic_lock);
+  g_mic_ring_read = 0;
+  g_mic_ring_write = 0;
+  g_mic_ring_count = 0;
+  pthread_mutex_unlock(&g_mic_lock);
+}
+
+static void vg_mic_ring_write(const int16_t *samples, size_t count)
+{
+  size_t i;
+
+  pthread_mutex_lock(&g_mic_lock);
+  for (i = 0; i < count; i++)
+    {
+      if (g_mic_ring_count == VG_MIC_RING_SAMPLES)
+        {
+          g_mic_ring_read = (g_mic_ring_read + 1) % VG_MIC_RING_SAMPLES;
+          g_mic_ring_count--;
+        }
+
+      g_mic_ring[g_mic_ring_write] = samples[i];
+      g_mic_ring_write = (g_mic_ring_write + 1) % VG_MIC_RING_SAMPLES;
+      g_mic_ring_count++;
+    }
+  pthread_mutex_unlock(&g_mic_lock);
+}
+
+static int vg_mic_enqueue(struct ap_buffer_s *buffer)
+{
+  struct audio_buf_desc_s desc;
+
+  buffer->nbytes = buffer->nmaxbytes;
+  buffer->curbyte = 0;
+  memset(&desc, 0, sizeof(desc));
+  desc.numbytes = buffer->nbytes;
+  desc.u.buffer = buffer;
+  return ioctl(g_mic_fd, AUDIOIOC_ENQUEUEBUFFER,
+               (unsigned long)&desc);
+}
+
+static void *vg_mic_worker(void *arg)
+{
+  struct audio_msg_s msg;
+  unsigned int prio;
+
+  (void)arg;
+  while (g_mic_running)
+    {
+      struct timespec deadline;
+
+      clock_gettime(CLOCK_REALTIME, &deadline);
+      deadline.tv_nsec += 100 * 1000 * 1000;
+      if (deadline.tv_nsec >= 1000000000L)
+        {
+          deadline.tv_sec++;
+          deadline.tv_nsec -= 1000000000L;
+        }
+
+      if (mq_timedreceive(g_mic_mq, (char *)&msg, sizeof(msg), &prio,
+                          &deadline) != sizeof(msg))
+        {
+          continue;
+        }
+
+      if (msg.msg_id == AUDIO_MSG_DEQUEUE && msg.u.ptr != NULL)
+        {
+          struct ap_buffer_s *buffer = msg.u.ptr;
+          size_t samples = buffer->nbytes / sizeof(int16_t);
+          size_t max_samples = buffer->nmaxbytes / sizeof(int16_t);
+
+          if (samples > max_samples) samples = max_samples;
+
+          if (samples > 0 && buffer->samp != NULL)
+            {
+              vg_mic_ring_write((const int16_t *)buffer->samp, samples);
+            }
+
+          if (g_mic_running)
+            {
+              (void)vg_mic_enqueue(buffer);
+            }
+        }
+      else if (msg.msg_id == AUDIO_MSG_COMPLETE ||
+               msg.msg_id == AUDIO_MSG_STOP)
+        {
+          break;
+        }
+    }
+
+  return NULL;
+}
+
+static void vg_mic_release(void)
+{
+  struct audio_buf_desc_s desc;
+  unsigned int i;
+
+  if (g_mic_fd < 0)
+    {
+      return;
+    }
+
+  (void)ioctl(g_mic_fd, AUDIOIOC_STOP, 0);
+  if (g_mic_mq != (mqd_t)-1)
+    {
+      (void)ioctl(g_mic_fd, AUDIOIOC_UNREGISTERMQ,
+                  (unsigned long)g_mic_mq);
+    }
+  memset(&desc, 0, sizeof(desc));
+  for (i = 0; i < g_mic_nbuffers; i++)
+    {
+      if (g_mic_buffers != NULL && g_mic_buffers[i] != NULL)
+        {
+          desc.u.buffer = g_mic_buffers[i];
+          (void)ioctl(g_mic_fd, AUDIOIOC_FREEBUFFER,
+                      (unsigned long)&desc);
+        }
+    }
+
+  free(g_mic_buffers);
+  g_mic_buffers = NULL;
+  g_mic_nbuffers = 0;
+  if (g_mic_mq != (mqd_t)-1)
+    {
+      (void)mq_close(g_mic_mq);
+      (void)mq_unlink("/tmp/velaguard_mic");
+      g_mic_mq = (mqd_t)-1;
+    }
+  (void)ioctl(g_mic_fd, AUDIOIOC_RELEASE, 0);
+  close(g_mic_fd);
+  g_mic_fd = -1;
+}
+
+static int vg_mic_open(const char *device)
+{
+  struct audio_caps_desc_s cap_desc;
+  struct ap_buffer_info_s buffer_info;
+  struct audio_buf_desc_s buffer_desc;
+  struct mq_attr attr;
+  unsigned int i;
+
+  g_mic_fd = open(device, O_RDWR | O_CLOEXEC);
+  if (g_mic_fd < 0 || ioctl(g_mic_fd, AUDIOIOC_RESERVE, 0) < 0)
+    {
+      vg_mic_release();
+      return -1;
+    }
+
+  memset(&cap_desc, 0, sizeof(cap_desc));
+  cap_desc.caps.ac_len = sizeof(struct audio_caps_s);
+  cap_desc.caps.ac_type = AUDIO_TYPE_INPUT;
+  cap_desc.caps.ac_channels = 1;
+  cap_desc.caps.ac_controls.hw[0] = VG_SAMPLE_RATE;
+  cap_desc.caps.ac_controls.b[2] = 16;
+  cap_desc.caps.ac_subtype = AUDIO_FMT_PCM;
+  if (ioctl(g_mic_fd, AUDIOIOC_CONFIGURE,
+            (unsigned long)&cap_desc) < 0)
+    {
+      vg_mic_release();
+      return -1;
+    }
+
+  memset(&buffer_info, 0, sizeof(buffer_info));
+  if (ioctl(g_mic_fd, AUDIOIOC_GETBUFFERINFO,
+            (unsigned long)&buffer_info) < 0 ||
+      buffer_info.nbuffers == 0 || buffer_info.buffer_size == 0)
+    {
+      buffer_info.nbuffers = 4;
+      buffer_info.buffer_size = 2048;
+    }
+
+  memset(&attr, 0, sizeof(attr));
+  attr.mq_maxmsg = buffer_info.nbuffers + 8;
+  attr.mq_msgsize = sizeof(struct audio_msg_s);
+  (void)mq_unlink("/tmp/velaguard_mic");
+  g_mic_mq = mq_open("/tmp/velaguard_mic", O_RDWR | O_CREAT, 0644, &attr);
+  if (g_mic_mq == (mqd_t)-1 ||
+      ioctl(g_mic_fd, AUDIOIOC_REGISTERMQ, (unsigned long)g_mic_mq) < 0)
+    {
+      vg_mic_release();
+      return -1;
+    }
+
+  g_mic_nbuffers = buffer_info.nbuffers;
+  g_mic_buffers = calloc(g_mic_nbuffers, sizeof(*g_mic_buffers));
+  if (g_mic_buffers == NULL)
+    {
+      vg_mic_release();
+      return -1;
+    }
+
+  for (i = 0; i < g_mic_nbuffers; i++)
+    {
+      memset(&buffer_desc, 0, sizeof(buffer_desc));
+      buffer_desc.numbytes = buffer_info.buffer_size;
+      buffer_desc.u.pbuffer = &g_mic_buffers[i];
+      if (ioctl(g_mic_fd, AUDIOIOC_ALLOCBUFFER,
+                (unsigned long)&buffer_desc) < 0 ||
+          vg_mic_enqueue(g_mic_buffers[i]) < 0)
+        {
+          vg_mic_release();
+          return -1;
+        }
+    }
+
+  vg_mic_ring_reset();
+  g_mic_running = true;
+  if (pthread_create(&g_mic_thread, NULL, vg_mic_worker, NULL) != 0)
+    {
+      g_mic_running = false;
+      vg_mic_release();
+      return -1;
+    }
+
+  if (ioctl(g_mic_fd, AUDIOIOC_START, 0) < 0)
+    {
+      struct audio_msg_s stop_msg;
+
+      g_mic_running = false;
+      memset(&stop_msg, 0, sizeof(stop_msg));
+      stop_msg.msg_id = AUDIO_MSG_STOP;
+      (void)mq_send(g_mic_mq, (const char *)&stop_msg,
+                    sizeof(stop_msg), 0);
+      pthread_join(g_mic_thread, NULL);
+      vg_mic_release();
+      return -1;
+    }
+
+  return 0;
+}
 
 static uint32_t vg_rd32(const unsigned char *p)
 {
@@ -201,9 +451,7 @@ int vg_capture_open(vg_source_t src, const char *path)
         return 0;
 
       case VG_SRC_MIC:
-        g_mic_fd = open(path != NULL ? path : CONFIG_VELAGUARD_PCM_DEVICE,
-                        O_RDONLY);
-        if (g_mic_fd < 0)
+        if (vg_mic_open(path != NULL ? path : CONFIG_VELAGUARD_PCM_DEVICE) < 0)
           {
             fprintf(stderr,
                     "[velaguard] 麦克风设备不可用(%s)。"
@@ -252,14 +500,17 @@ int vg_capture_read(int16_t *buf, size_t nsamples)
 
       case VG_SRC_MIC:
         {
-          ssize_t n = read(g_mic_fd, buf, nsamples * sizeof(int16_t));
+          size_t count = 0;
 
-          if (n <= 0)
+          pthread_mutex_lock(&g_mic_lock);
+          while (count < nsamples && g_mic_ring_count > 0)
             {
-              return (int)n;
+              buf[count++] = g_mic_ring[g_mic_ring_read];
+              g_mic_ring_read = (g_mic_ring_read + 1) % VG_MIC_RING_SAMPLES;
+              g_mic_ring_count--;
             }
-
-          return (int)(n / (ssize_t)sizeof(int16_t));
+          pthread_mutex_unlock(&g_mic_lock);
+          return (int)count;
         }
 
       default:
@@ -277,8 +528,19 @@ void vg_capture_close(void)
 
   if (g_mic_fd >= 0)
     {
-      close(g_mic_fd);
-      g_mic_fd = -1;
+      if (g_mic_running)
+        {
+          struct audio_msg_s stop_msg;
+
+          g_mic_running = false;
+          (void)ioctl(g_mic_fd, AUDIOIOC_STOP, 0);
+          memset(&stop_msg, 0, sizeof(stop_msg));
+          stop_msg.msg_id = AUDIO_MSG_STOP;
+          (void)mq_send(g_mic_mq, (const char *)&stop_msg,
+                        sizeof(stop_msg), 0);
+          pthread_join(g_mic_thread, NULL);
+        }
+      vg_mic_release();
     }
 
   g_source = VG_SRC_NONE;

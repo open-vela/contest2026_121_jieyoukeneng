@@ -28,6 +28,7 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_121_VELAGUARD)
       uploader/vg_uploader.c
       hardware_adapter/vg_indicator.c
       hardware_adapter/vg_input.c
+      hardware_adapter/vg_diagnostics.c
       hardware_adapter/vg_ui.c
       hardware_adapter/vg_ui_lvgl.c)
 

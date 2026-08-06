@@ -68,6 +68,15 @@
     color: var(--muted); font-size: 12px; text-align: center;
     padding: 20px 24px; line-height: 1.8;
   }
+  .pairing {
+    max-width: 720px; margin: 12px auto 0; padding: 0 12px;
+  }
+  .pairing summary { cursor: pointer; color: #9fb6c9; }
+  .pairing form { display: flex; gap: 8px; margin-top: 8px; }
+  .pairing input { min-width: 0; flex: 1; padding: 9px; border: 1px solid var(--line);
+    border-radius: 8px; background: #171c26; color: var(--text); }
+  .pairing button { flex: 0 0 96px; }
+  #pairingMsg { color: var(--muted); font-size: 12px; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -76,6 +85,18 @@
   <h1>安聆 VelaGuard · 家属视角</h1>
   <span class="sub" id="sub">连接中…</span>
 </header>
+
+<section class="pairing">
+  <details>
+    <summary>设备配对</summary>
+    <form id="pairingForm">
+      <input id="pairingDevice" placeholder="设备编号，例如 velaguard_demo_001" autocomplete="off">
+      <input id="pairingKey" type="password" placeholder="配对密钥" autocomplete="off">
+      <button type="submit">配对</button>
+    </form>
+    <div id="pairingMsg"></div>
+  </details>
+</section>
 
 <main>
   <div id="list"></div>
@@ -107,6 +128,11 @@ const dot = document.getElementById('dot');
 const sub = document.getElementById('sub');
 const seen = new Map();
 const commandStates = new Map();
+let sessionToken = localStorage.getItem('velaguard_session') || '';
+
+function authHeaders(extra = {}) {
+  return sessionToken ? { ...extra, Authorization: `Bearer ${sessionToken}` } : extra;
+}
 
 function fmtTime(iso) {
   if (!iso) return '';
@@ -172,7 +198,7 @@ list.addEventListener('click', async (e) => {
   try {
     const r = await fetch(`/events/${btn.dataset.id}/commands`, {
       method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         action: btn.dataset.st,
         desiredRevision: Number(btn.dataset.rev),
@@ -214,14 +240,15 @@ function beep(level) {
 
 async function bootstrap() {
   try {
-    const r = await fetch('/events?limit=100');
+    const r = await fetch('/events?limit=100', { headers: authHeaders() });
     const j = await r.json();
     (j.events || []).slice().reverse().forEach(render);
   } catch { /* 离线，等 SSE */ }
 }
 
 function connect() {
-  const es = new EventSource('/stream');
+  const streamUrl = sessionToken ? `/stream?session=${encodeURIComponent(sessionToken)}` : '/stream';
+  const es = new EventSource(streamUrl);
   es.addEventListener('hello', () => {
     dot.classList.add('on');
     sub.textContent = '已连接';
@@ -240,6 +267,29 @@ function connect() {
 }
 
 bootstrap().then(connect);
+
+document.getElementById('pairingForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const msg = document.getElementById('pairingMsg');
+  try {
+    const response = await fetch('/pairing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: document.getElementById('pairingDevice').value.trim(),
+        key: document.getElementById('pairingKey').value,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error('密钥错误或设备不匹配');
+    sessionToken = result.sessionToken;
+    localStorage.setItem('velaguard_session', sessionToken);
+    msg.textContent = '配对成功，正在重新连接设备';
+    setTimeout(() => window.location.reload(), 250);
+  } catch (error) {
+    msg.textContent = `配对失败：${error.message}`;
+  }
+});
 </script>
 </body>
 </html>

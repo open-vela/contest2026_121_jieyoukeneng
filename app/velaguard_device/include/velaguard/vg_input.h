@@ -13,6 +13,8 @@
 
 #include <stdbool.h>
 
+#include "velaguard/vg_diagnostics.h"
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -28,7 +30,10 @@ typedef enum
   VG_ACT_ENTER,            /* SW6 确认 / 进入录入向导 */
   VG_ACT_BACK,             /* 长按 SW6 取消 */
   VG_ACT_SCROLL_UP,
-  VG_ACT_SCROLL_DOWN
+  VG_ACT_SCROLL_DOWN,
+  VG_ACT_TEST_MIC,
+  VG_ACT_TEST_SPEAKER,
+  VG_ACT_TEST_NETWORK
 } vg_action_t;
 
 int  vg_input_init(void);

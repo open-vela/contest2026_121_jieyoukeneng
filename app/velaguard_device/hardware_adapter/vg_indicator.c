@@ -134,7 +134,7 @@ vg_led_mode_t vg_indicator_led(void)
   return g_mode;
 }
 
-void vg_indicator_play(vg_level_t level)
+int vg_indicator_play(vg_level_t level)
 {
   uint32_t duration_ms;
   uint32_t duration_sec;
@@ -185,7 +185,8 @@ void vg_indicator_play(vg_level_t level)
       if (player == NULL)
         {
           printf("[velaguard] 创建提示音播放器失败，降级为控制台提示\n");
-          return;
+          vg_capture_release_playback();
+          return -1;
         }
 
       ret = nxplayer_setdevice(player, CONFIG_VELAGUARD_AUDIO_OUT_DEVICE);
@@ -206,18 +207,26 @@ void vg_indicator_play(vg_level_t level)
           printf("[velaguard] 已播放 %s 级提示音（%s）\n",
                  vg_level_cn(level), g_full_duplex ? "录放并发" : "时分让路");
         }
+      vg_capture_release_playback();
+      return ret < 0 ? ret : 0;
 #else
       (void)duration_sec;
       (void)pitch_hz;
       printf("[velaguard] 播放 %s 级提示音（主机线无扬声器，%s）\n",
              vg_level_cn(level), g_full_duplex ? "录放并发" : "时分让路");
+      vg_capture_release_playback();
+      return -1;
 #endif
     }
   else
     {
       printf("[velaguard] 提示音(%s级) —— 无扬声器资源，控制台提示\n",
              vg_level_cn(level));
+      vg_capture_release_playback();
+      return -1;
     }
+
+  return -1;
 }
 
 void vg_indicator_backlight_wake(void)
