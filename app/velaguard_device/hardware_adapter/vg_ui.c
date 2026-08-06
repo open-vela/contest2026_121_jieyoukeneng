@@ -36,6 +36,8 @@ static int               g_wiz_style;
 static bool              g_wiz_restart_daemon;
 static volatile bool     g_wiz_capture_running;
 static volatile bool     g_wiz_cancel_requested;
+static volatile bool     g_wiz_audio_ready = true;
+static volatile bool     g_wiz_restore_running;
 
 /* ASCII 备用名：串口调试和无中文字体的构建仍可使用。 */
 
@@ -444,6 +446,48 @@ void vg_ui_history_scroll(int delta)
 
 static void vg_wizard_audio_restore(void);
 
+static void *vg_wizard_prepare_worker(void *arg)
+{
+  (void)arg;
+  vg_daemon_stop();
+  g_wiz_audio_ready = true;
+  return NULL;
+}
+
+static void *vg_wizard_restore_worker(void *arg)
+{
+  (void)arg;
+  vg_wizard_audio_restore();
+  g_wiz_restore_running = false;
+  return NULL;
+}
+
+static void vg_wizard_audio_restore_async(void)
+{
+  pthread_t thread;
+
+  if (!g_wiz_restart_daemon)
+    {
+      vg_capture_resume();
+      return;
+    }
+
+  if (g_wiz_restore_running)
+    {
+      return;
+    }
+
+  g_wiz_restore_running = true;
+  if (pthread_create(&thread, NULL, vg_wizard_restore_worker, NULL) != 0)
+    {
+      g_wiz_restore_running = false;
+      printf("[velaguard] 守护恢复线程启动失败\n");
+      return;
+    }
+
+  pthread_detach(thread);
+}
+
 static void *vg_wizard_capture_worker(void *arg)
 {
   int16_t pcm[VG_WINDOW_SAMPLES];
@@ -508,6 +552,12 @@ static int vg_wizard_capture_start(void)
       return -1;
     }
 
+  if (!g_wiz_audio_ready)
+    {
+      printf("[velaguard] 音频通路正在切换，请稍候再采集\n");
+      return -1;
+    }
+
   g_wiz_capture_running = true;
   if (pthread_create(&thread, NULL, vg_wizard_capture_worker, NULL) != 0)
     {
@@ -545,10 +595,21 @@ void vg_ui_wizard_start(void)
   g_wiz_cancel_requested = false;
   g_wiz_restart_daemon = vg_daemon_running() &&
                          vg_capture_source() == VG_SRC_MIC;
+  g_wiz_audio_ready = !vg_daemon_running();
 
   if (vg_daemon_running())
     {
-      vg_daemon_stop();
+      pthread_t thread;
+
+      if (pthread_create(&thread, NULL, vg_wizard_prepare_worker, NULL) == 0)
+        {
+          pthread_detach(thread);
+        }
+      else
+        {
+          g_wiz_audio_ready = true;
+          printf("[velaguard] 音频通路切换线程启动失败\n");
+        }
     }
 
   /* 录入与守护采集互斥（PRD-01） */
@@ -683,7 +744,7 @@ void vg_ui_wizard_confirm(void)
         else if (!g_wiz_capture_running && vg_enroll_commit() >= 0)
           {
             g_wizard = VG_WIZ_DONE;
-            vg_wizard_audio_restore();
+            vg_wizard_audio_restore_async();
           }
         break;
 
@@ -706,7 +767,7 @@ void vg_ui_wizard_cancel(void)
 
   vg_enroll_cancel();
   g_wizard = VG_WIZ_IDLE;
-  vg_wizard_audio_restore();
+  vg_wizard_audio_restore_async();
   vg_indicator_set_led(VG_LED_GUARD);
 }
 
