@@ -99,10 +99,6 @@ static void vg_lvgl_button_event(lv_event_t *event)
         {
           vg_ui_set_page(VG_PAGE_TEST);
         }
-      else if (vg_ui_page() == VG_PAGE_TEST_MORE && index == 3)
-        {
-          vg_ui_set_page(VG_PAGE_HOME);
-        }
       else if (vg_ui_page() == VG_PAGE_HISTORY && index == 3)
         {
           vg_ui_set_page(VG_PAGE_TEST);
@@ -139,13 +135,19 @@ static void vg_lvgl_refresh_buttons(void)
 
   if (vg_ui_wizard_active())
     {
-      vg_lvgl_set_button(0, "上一步", VG_ACT_HANDLED);
+      vg_lvgl_set_button(0, vg_ui_wizard_state() == VG_WIZ_PICK_KIND ?
+                         "取消" : "上一步",
+                         vg_ui_wizard_state() == VG_WIZ_PICK_KIND ?
+                         VG_ACT_BACK : VG_ACT_HANDLED);
       vg_lvgl_set_button(1, vg_ui_wizard_state() == VG_WIZ_RECORDING ?
                          "采集" : "下一项",
                          vg_ui_wizard_state() == VG_WIZ_RECORDING ?
                          VG_ACT_ENTER : VG_ACT_PAGE);
-      vg_lvgl_set_button(2, vg_ui_wizard_state() == VG_WIZ_RECORDING ?
-                         "保存" : "确认", VG_ACT_ENTER);
+      vg_lvgl_set_button(2, vg_ui_wizard_state() == VG_WIZ_DONE ?
+                         "完成" : vg_ui_wizard_state() == VG_WIZ_RECORDING ?
+                         "保存" : "确认",
+                         vg_ui_wizard_state() == VG_WIZ_DONE ?
+                         VG_ACT_BACK : VG_ACT_ENTER);
       vg_lvgl_set_button(3, "取消", VG_ACT_BACK);
       lv_obj_add_flag(g_buttons[4], LV_OBJ_FLAG_HIDDEN);
       return;
