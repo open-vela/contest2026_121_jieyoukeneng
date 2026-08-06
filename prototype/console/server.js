@@ -18,6 +18,8 @@
  *   PATCH  /events/:id    兼容入口：只创建命令，不直接改事件
  *   GET    /stream        SSE 实时事件流
  *   GET    /health        健康检查
+ *   GET    /pairing       局域网配对状态
+ *   POST   /pairing       使用配对密钥建立家属会话
  */
 
 'use strict';
@@ -39,6 +41,9 @@ const COMMAND_KEY_ID = process.env.VELAGUARD_COMMAND_KEY_ID ||
   (DEMO_PROFILE ? 'demo' : '');
 const COMMAND_SIGNING_KEY = process.env.VELAGUARD_COMMAND_SIGNING_KEY ||
   (DEMO_PROFILE ? 'demo-command-key' : '');
+const PAIRING_KEY = process.env.VELAGUARD_PAIRING_KEY ||
+  (DEMO_PROFILE ? 'velaguard-demo' : '');
+const pairingSessions = new Map();
 
 const EVENT_TYPES = new Set([
   'alarm_beep', 'water_flow', 'impact', 'distress_voice', 'name_call_help',
@@ -170,6 +175,9 @@ const upsertEvent = db.prepare(
 const selectOne = db.prepare('SELECT * FROM events WHERE eventId = ?');
 const selectMany = db.prepare(
   'SELECT * FROM events ORDER BY receivedAt DESC, rowid DESC LIMIT ?');
+const selectManyForDevice = db.prepare(
+  'SELECT * FROM events WHERE deviceId = ? ' +
+  'ORDER BY receivedAt DESC, rowid DESC LIMIT ?');
 const selectIngress = db.prepare(
   'SELECT * FROM ingress_messages WHERE messageId = ?');
 const insertIngress = db.prepare(
@@ -203,11 +211,12 @@ const clients = new Set();
 
 function broadcast(type, payload) {
   const chunk = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
-  for (const res of clients) {
+  for (const client of clients) {
+    if (client.deviceId && client.deviceId !== payload.deviceId) continue;
     try {
-      res.write(chunk);
+      client.res.write(chunk);
     } catch {
-      clients.delete(res);
+      clients.delete(client);
     }
   }
 }
@@ -428,8 +437,10 @@ const DEMO_ALLOW_ANONYMOUS = DEMO_PROFILE &&
 
 function tokenFromRequest(req) {
   const auth = req.headers.authorization || '';
-  return auth.startsWith('Bearer ') ? auth.slice(7) :
-    String(req.headers['x-velaguard-device-token'] || '');
+  if (auth.startsWith('Bearer ')) return auth.slice(7);
+  const queryToken = new URL(req.url || '/', 'http://localhost')
+    .searchParams.get('session');
+  return queryToken || String(req.headers['x-velaguard-device-token'] || '');
 }
 
 function tokenMatches(actual, expected) {
@@ -437,6 +448,24 @@ function tokenMatches(actual, expected) {
   let diff = 0;
   for (let i = 0; i < expected.length; i++) diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
   return diff === 0;
+}
+
+function issuePairingSession(deviceId) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  pairingSessions.set(token, {
+    deviceId,
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+  });
+  return token;
+}
+
+function pairingSessionValid(token) {
+  const session = pairingSessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    if (session) pairingSessions.delete(token);
+    return false;
+  }
+  return true;
 }
 
 function authorizedDevice(req, deviceId) {
@@ -455,9 +484,23 @@ function authorizedDevice(req, deviceId) {
 }
 
 function authorizedSession(req) {
-  const token = String(req.headers.authorization || '').replace(/^Bearer /, '');
-  if (SESSION_TOKEN) return tokenMatches(token, SESSION_TOKEN);
+  const token = tokenFromRequest(req);
+  if (SESSION_TOKEN && tokenMatches(token, SESSION_TOKEN)) return true;
+  if (pairingSessionValid(token)) return true;
   return DEMO_ALLOW_ANONYMOUS && !token;
+}
+
+function sessionDeviceId(req) {
+  const token = tokenFromRequest(req);
+  const session = pairingSessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) return null;
+  return session.deviceId;
+}
+
+function authorizedSessionForDevice(req, deviceId) {
+  if (!authorizedSession(req)) return false;
+  const pairedDeviceId = sessionDeviceId(req);
+  return !pairedDeviceId || pairedDeviceId === deviceId;
 }
 
 function corsHeaders(req) {
@@ -705,15 +748,17 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
+      'Referrer-Policy': 'no-referrer',
       Connection: 'keep-alive',
       ...corsHeaders(req),
     });
     res.write(`event: hello\ndata: ${JSON.stringify({ ok: true })}\n\n`);
-    clients.add(res);
+    const client = { res, deviceId: sessionDeviceId(req) };
+    clients.add(client);
     const ka = setInterval(() => {
       try { res.write(': keepalive\n\n'); } catch { /* ignore */ }
     }, 15000);
-    req.on('close', () => { clearInterval(ka); clients.delete(res); });
+    req.on('close', () => { clearInterval(ka); clients.delete(client); });
     return undefined;
   }
 
@@ -724,6 +769,41 @@ const server = http.createServer(async (req, res) => {
       warning: DEMO_PROFILE ? '演示 profile：请勿暴露到公网' : undefined,
       clients: clients.size,
       events: db.prepare('SELECT COUNT(*) AS n FROM events').get().n,
+    });
+  }
+
+  if (pathname === '/pairing' && req.method === 'GET') {
+    return send(res, 200, {
+      ok: true,
+      profile: DEMO_PROFILE ? 'demo' : 'production',
+      deviceId: EXPECTED_DEVICE_ID || null,
+      keyRequired: !DEMO_PROFILE || Boolean(PAIRING_KEY),
+      expiresInSec: 24 * 60 * 60,
+    });
+  }
+
+  if (pathname === '/pairing' && req.method === 'POST') {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return send(res, 400, { ok: false, errorCode: 'invalid_json' });
+    }
+
+    const deviceId = isObject(body) && idOk(body.deviceId) ? body.deviceId : '';
+    const key = isObject(body) && typeof body.key === 'string' ? body.key : '';
+    if (!deviceId || !PAIRING_KEY || !tokenMatches(key, PAIRING_KEY) ||
+        (EXPECTED_DEVICE_ID && deviceId !== EXPECTED_DEVICE_ID)) {
+      return send(res, 401, { ok: false, errorCode: 'pairing_rejected' });
+    }
+
+    const sessionToken = issuePairingSession(deviceId);
+    return send(res, 200, {
+      ok: true,
+      paired: true,
+      deviceId,
+      sessionToken,
+      expiresInSec: 24 * 60 * 60,
     });
   }
 
@@ -814,7 +894,11 @@ const server = http.createServer(async (req, res) => {
       return send(res, 401, { ok: false, error: '需要家属会话授权' });
     }
     const limit = Math.min(Number(url.searchParams.get('limit') || 100), 500);
-    return send(res, 200, { ok: true, events: selectMany.all(limit) });
+    const deviceId = sessionDeviceId(req);
+    return send(res, 200, {
+      ok: true,
+      events: deviceId ? selectManyForDevice.all(deviceId, limit) : selectMany.all(limit),
+    });
   }
 
   const commandPath = pathname.match(/^\/events\/([\w.-]+)\/commands$/);
@@ -824,6 +908,9 @@ const server = http.createServer(async (req, res) => {
     }
     const event = selectOne.get(commandPath[1]);
     if (!event) return send(res, 404, { ok: false, error: '未找到事件' });
+    if (!authorizedSessionForDevice(req, event.deviceId)) {
+      return send(res, 403, { ok: false, error: '会话未授权此设备' });
+    }
     let body;
     try {
       body = JSON.parse(await readBody(req));
@@ -970,6 +1057,9 @@ const server = http.createServer(async (req, res) => {
     }
     const event = selectOne.get(legacyPatch[1]);
     if (!event) return send(res, 404, { ok: false, error: '未找到事件' });
+    if (!authorizedSessionForDevice(req, event.deviceId)) {
+      return send(res, 403, { ok: false, error: '会话未授权此设备' });
+    }
     let body;
     try {
       body = JSON.parse(await readBody(req));
@@ -1001,6 +1091,9 @@ const server = http.createServer(async (req, res) => {
     const id = m[1];
     const found = selectOne.get(id);
     if (!found) return send(res, 404, { ok: false, error: '未找到事件' });
+    if (!authorizedSessionForDevice(req, found.deviceId)) {
+      return send(res, 403, { ok: false, error: '会话未授权此设备' });
+    }
 
     if (req.method === 'GET') return send(res, 200, { ok: true, event: found });
 

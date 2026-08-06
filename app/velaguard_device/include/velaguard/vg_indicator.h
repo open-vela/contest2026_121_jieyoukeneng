@@ -42,7 +42,7 @@ vg_led_mode_t vg_indicator_led(void);
  * 播放期间按 PRD-04 时分方案让路给采集（单次 <= 2 秒）。
  */
 
-void vg_indicator_play(vg_level_t level);
+int  vg_indicator_play(vg_level_t level);
 
 /* LCD 背光唤醒 */
 

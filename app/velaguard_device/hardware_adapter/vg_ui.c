@@ -29,7 +29,7 @@ static int               g_wiz_phrase;
 static int               g_wiz_person;
 static int               g_wiz_style;
 
-/* ASCII 备用名（LVGL 默认字体不含 CJK） */
+/* ASCII 备用名：串口调试和无中文字体的构建仍可使用。 */
 
 static const char * const g_type_ascii[VG_EVT_TYPE_MAX] =
 {
@@ -345,6 +345,28 @@ static int vg_render_history(char *buf, size_t len, bool ascii)
   return (int)pos;
 }
 
+static int vg_render_settings(char *buf, size_t len, bool ascii)
+{
+  char ts[VG_TIMESTR_LEN];
+  size_t pos = 0;
+
+  vg_format_time(vg_wall_sec(), ts, sizeof(ts));
+  VG_APPEND("%s\n", ascii ? "== SETTINGS / TEST ==" : "== 设置与设备自检 ==");
+  VG_APPEND("%s: %s\n", ascii ? "Date" : "日期",
+            vg_time_reliable() ? ts : "时间未同步");
+  VG_APPEND("%s: %s\n", ascii ? "Network" : "网络",
+            vg_uploader_online() ? (ascii ? "ONLINE" : "已连接")
+                                 : (ascii ? "OFFLINE" : "未连接"));
+  VG_APPEND("%s: %s\n", ascii ? "Microphone" : "麦克风",
+            ascii ? "run test" : "点击下方按钮测试");
+  VG_APPEND("%s: %s\n", ascii ? "Speaker" : "扬声器",
+            vg_indicator_has_audio_out() ? (ascii ? "READY" : "已发现")
+                                         : (ascii ? "MISSING" : "未发现"));
+  VG_APPEND("%s\n", ascii ? "Tests do not save raw audio."
+                            : "测试只读取临时采样，不保存原始录音。");
+  return (int)pos;
+}
+
 #undef VG_APPEND
 
 /****************************************************************************
@@ -425,6 +447,9 @@ int vg_ui_render(char *buf, size_t len, bool ascii)
 
       case VG_PAGE_HISTORY:
         return vg_render_history(buf, len, ascii);
+
+      case VG_PAGE_SETTINGS:
+        return vg_render_settings(buf, len, ascii);
 
       default:
         return vg_render_home(buf, len, ascii);

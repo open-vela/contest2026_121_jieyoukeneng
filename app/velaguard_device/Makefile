@@ -32,6 +32,7 @@ CSRCS += uploader/vg_agent.c
 CSRCS += uploader/vg_uploader.c
 CSRCS += hardware_adapter/vg_indicator.c
 CSRCS += hardware_adapter/vg_input.c
+CSRCS += hardware_adapter/vg_diagnostics.c
 CSRCS += hardware_adapter/vg_ui.c
 CSRCS += hardware_adapter/vg_ui_lvgl.c
 CSRCS += velaguard_daemon.c

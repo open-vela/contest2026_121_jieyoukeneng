@@ -24,6 +24,7 @@ typedef enum
   VG_PAGE_HOME = 0,     /* 监测首页 */
   VG_PAGE_EVENT,        /* 事件确认页 */
   VG_PAGE_HISTORY,      /* 历史记录页 */
+  VG_PAGE_SETTINGS,     /* 日历与设备自检 */
   VG_PAGE_MAX
 } vg_page_t;
 

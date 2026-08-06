@@ -17,12 +17,14 @@
 #include "velaguard/vg_config.h"
 #include "velaguard/vg_daemon.h"
 #include "velaguard/vg_detector.h"
+#include "velaguard/vg_diagnostics.h"
 #include "velaguard/vg_enroll.h"
 #include "velaguard/vg_event_log.h"
 #include "velaguard/vg_event_sm.h"
 #include "velaguard/vg_feature.h"
 #include "velaguard/vg_indicator.h"
 #include "velaguard/vg_input.h"
+#include "velaguard/vg_indicator.h"
 #include "velaguard/vg_json.h"
 #include "velaguard/vg_notifier.h"
 #include "velaguard/vg_time.h"
@@ -65,6 +67,7 @@ static void vg_usage(void)
     "运维与自检\n"
     "  time <sync|unsync>           标记时间是否可信（夜间规则降级演示）\n"
     "  duplex <on|off>              标定录放并发能力\n"
+    "  test <mic|speaker|network|all> 板端硬件与网络自检\n"
     "  notify test                  生成一条测试通知并上传\n"
     "  notify --json '<事件JSON>'    Skill 文案回灌（见 agent_skill/）\n"
     "  flush                        立即重试所有待发送通知\n"
@@ -466,6 +469,23 @@ static int vg_cmd_enroll(int argc, char **argv)
 
 static int vg_cmd_selftest(void);
 
+static int vg_cmd_test(int argc, char **argv)
+{
+  const char *kind = argc >= 3 ? argv[2] : "all";
+
+  if (strcmp(kind, "mic") != 0 && strcmp(kind, "speaker") != 0 &&
+      strcmp(kind, "network") != 0 && strcmp(kind, "all") != 0)
+    {
+      printf("用法: velaguard test <mic|speaker|network|all>\n");
+      return 1;
+    }
+
+  return vg_diagnostics_run(strcmp(kind, "mic") == 0 ? VG_DIAG_MIC :
+                            strcmp(kind, "speaker") == 0 ? VG_DIAG_SPEAKER :
+                            strcmp(kind, "network") == 0 ? VG_DIAG_NETWORK :
+                            VG_DIAG_ALL) == 0 ? 0 : 1;
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -517,6 +537,11 @@ int main(int argc, char *argv[])
     {
       vg_daemon_status();
       return 0;
+    }
+
+  if (strcmp(cmd, "test") == 0)
+    {
+      return vg_cmd_test(argc, argv);
     }
 
   if (strcmp(cmd, "config") == 0)
