@@ -34,6 +34,7 @@ static int               g_wiz_person;
 static int               g_wiz_style;
 static bool              g_wiz_restart_daemon;
 static volatile bool     g_wiz_capture_running;
+static volatile bool     g_wiz_cancel_requested;
 static pthread_mutex_t   g_wiz_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ASCII 备用名：串口调试和无中文字体的构建仍可使用。 */
@@ -437,6 +438,8 @@ void vg_ui_history_scroll(int delta)
  * 录入向导 (PRD-02)
  ****************************************************************************/
 
+static void vg_wizard_audio_restore(void);
+
 static void *vg_wizard_capture_worker(void *arg)
 {
   int16_t pcm[VG_WINDOW_SAMPLES];
@@ -451,7 +454,7 @@ static void *vg_wizard_capture_worker(void *arg)
       goto done;
     }
 
-  while (got < VG_WINDOW_SAMPLES && tries++ < 120)
+  while (!g_wiz_cancel_requested && got < VG_WINDOW_SAMPLES && tries++ < 120)
     {
       int n = vg_capture_read(pcm + got, VG_WINDOW_SAMPLES - got);
 
@@ -466,14 +469,15 @@ static void *vg_wizard_capture_worker(void *arg)
     }
 
   vg_capture_close();
-  if (got < VG_FRAME_LEN || vg_feature_extract(pcm, (size_t)got, feat) < 0)
+  if (!g_wiz_cancel_requested &&
+      (got < VG_FRAME_LEN || vg_feature_extract(pcm, (size_t)got, feat) < 0))
     {
       printf("[velaguard] 录入失败：麦克风采样不足，请重试\n");
       goto done;
     }
 
   pthread_mutex_lock(&g_wiz_lock);
-  if (g_wizard == VG_WIZ_RECORDING &&
+  if (!g_wiz_cancel_requested && g_wizard == VG_WIZ_RECORDING &&
       vg_enroll_feed(feat) < 0)
     {
       printf("[velaguard] 录入失败：模板采样已达到上限\n");
@@ -482,6 +486,12 @@ static void *vg_wizard_capture_worker(void *arg)
 
 done:
   g_wiz_capture_running = false;
+  if (g_wiz_cancel_requested)
+    {
+      vg_wizard_audio_restore();
+      vg_indicator_set_led(VG_LED_GUARD);
+      g_wiz_cancel_requested = false;
+    }
   return NULL;
 }
 
@@ -529,6 +539,7 @@ void vg_ui_wizard_start(void)
   g_wiz_phrase = 0;
   g_wiz_person = 0;
   g_wiz_style = VG_TPL_CALM;
+  g_wiz_cancel_requested = false;
   g_wiz_restart_daemon = vg_daemon_running() &&
                          vg_capture_source() == VG_SRC_MIC;
 
@@ -606,6 +617,25 @@ void vg_ui_wizard_prev(void)
   int n = vg_wiz_option_count();
   int *ref = vg_wiz_option_ref();
 
+  if (g_wizard == VG_WIZ_RECORDING)
+    {
+      if (g_wiz_capture_running)
+        {
+          printf("[velaguard] 当前正在采集，请稍候再返回\n");
+          return;
+        }
+
+      vg_enroll_cancel();
+      g_wizard = VG_WIZ_PICK_STYLE;
+      return;
+    }
+
+  if (g_wizard == VG_WIZ_DONE)
+    {
+      g_wizard = VG_WIZ_PICK_STYLE;
+      return;
+    }
+
   if (ref != NULL && n > 0)
     {
       *ref = (*ref + n - 1) % n;
@@ -665,7 +695,12 @@ void vg_ui_wizard_cancel(void)
 {
   if (g_wiz_capture_running)
     {
-      printf("[velaguard] 当前正在采集，请采集结束后再返回\n");
+      g_wiz_cancel_requested = true;
+      pthread_mutex_lock(&g_wiz_lock);
+      vg_enroll_cancel();
+      g_wizard = VG_WIZ_IDLE;
+      pthread_mutex_unlock(&g_wiz_lock);
+      printf("[velaguard] 已取消录入，当前采样结束后恢复守护\n");
       return;
     }
 

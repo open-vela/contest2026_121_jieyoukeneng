@@ -10,10 +10,12 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __NuttX__
 #include <mqueue.h>
 #include <sys/ioctl.h>
 
 #include <nuttx/audio/audio.h>
+#endif
 
 #include "velaguard/vg_types.h"
 #include "velaguard/vg_capture.h"
@@ -45,6 +47,7 @@ static vg_source_t g_source = VG_SRC_NONE;
 static FILE       *g_wav;
 static vg_wav_info_t g_wav_info;
 static long        g_wav_pos;
+#ifdef __NuttX__
 static int         g_mic_fd = -1;
 static mqd_t       g_mic_mq = (mqd_t)-1;
 static struct ap_buffer_s **g_mic_buffers;
@@ -57,6 +60,7 @@ static int16_t      g_mic_ring[VG_MIC_RING_SAMPLES];
 static size_t       g_mic_ring_read;
 static size_t       g_mic_ring_write;
 static size_t       g_mic_ring_count;
+#endif
 static bool        g_paused;
 static char        g_pause_reason[48];
 static uint64_t    g_hold_until_ms;
@@ -64,6 +68,8 @@ static uint64_t    g_hold_until_ms;
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+#ifdef __NuttX__
 
 static void vg_mic_ring_reset(void)
 {
@@ -298,6 +304,16 @@ static int vg_mic_open(const char *device)
   return 0;
 }
 
+#else
+
+static int vg_mic_open(const char *device)
+{
+  (void)device;
+  return -1;
+}
+
+#endif
+
 static uint32_t vg_rd32(const unsigned char *p)
 {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -500,6 +516,7 @@ int vg_capture_read(int16_t *buf, size_t nsamples)
 
       case VG_SRC_MIC:
         {
+#ifdef __NuttX__
           size_t count = 0;
 
           pthread_mutex_lock(&g_mic_lock);
@@ -511,6 +528,9 @@ int vg_capture_read(int16_t *buf, size_t nsamples)
             }
           pthread_mutex_unlock(&g_mic_lock);
           return (int)count;
+#else
+          return -1;
+#endif
         }
 
       default:
@@ -526,6 +546,7 @@ void vg_capture_close(void)
       g_wav = NULL;
     }
 
+#ifdef __NuttX__
   if (g_mic_fd >= 0)
     {
       if (g_mic_running)
@@ -542,6 +563,7 @@ void vg_capture_close(void)
         }
       vg_mic_release();
     }
+#endif
 
   g_source = VG_SRC_NONE;
 }

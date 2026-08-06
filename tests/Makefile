@@ -38,6 +38,7 @@ SRCS := \
   $(APP_DIR)/uploader/vg_uploader.c \
   $(APP_DIR)/hardware_adapter/vg_indicator.c \
   $(APP_DIR)/hardware_adapter/vg_input.c \
+  $(APP_DIR)/hardware_adapter/vg_diagnostics.c \
   $(APP_DIR)/hardware_adapter/vg_ui.c \
   $(APP_DIR)/velaguard_daemon.c
 
