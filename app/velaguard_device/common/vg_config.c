@@ -4,9 +4,13 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "velaguard/vg_config.h"
 #include "velaguard/vg_json.h"
@@ -299,9 +303,17 @@ int vg_config_load(const char *path)
       return -1;
     }
 
-  fseek(fp, 0, SEEK_END);
+  if (fseek(fp, 0, SEEK_END) != 0)
+    {
+      fclose(fp);
+      return -1;
+    }
   size = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
+  if (size < 0 || fseek(fp, 0, SEEK_SET) != 0)
+    {
+      fclose(fp);
+      return -1;
+    }
 
   if (size <= 0 || size > 16384)
     {
@@ -316,7 +328,17 @@ int vg_config_load(const char *path)
       return -1;
     }
 
-  size = (long)fread(buf, 1, (size_t)size, fp);
+  {
+    size_t expected = (size_t)size;
+    size_t actual = fread(buf, 1, expected, fp);
+    if (actual != expected)
+      {
+        free(buf);
+        fclose(fp);
+        return -1;
+      }
+    size = (long)actual;
+  }
   buf[size] = '\0';
   fclose(fp);
 
@@ -419,6 +441,197 @@ int vg_config_load(const char *path)
 
   *cfg = candidate;
   return 0;
+}
+
+static int vg_config_write_string(FILE *fp, const char *key,
+                                  const char *value, bool comma)
+{
+  char escaped[VG_SIGNATURE_LEN * 2 + 8];
+
+  if (vg_json_put_escaped(escaped, sizeof(escaped), 0, value) >=
+      sizeof(escaped) - 1)
+    {
+      return -1;
+    }
+
+  return fprintf(fp, "  \"%s\": %s%s\n", key, escaped,
+                 comma ? "," : "") < 0 ? -1 : 0;
+}
+
+static int vg_config_sync_parent(const char *path)
+{
+  char parent[VG_PATH_LEN + 32];
+  const char *slash;
+  size_t length;
+  int fd;
+  int ret;
+  int saved_errno;
+
+  slash = strrchr(path, '/');
+  if (slash == NULL)
+    {
+      return -EINVAL;
+    }
+
+  length = (size_t)(slash - path);
+  if (length == 0)
+    {
+      length = 1;
+    }
+  if (length >= sizeof(parent))
+    {
+      return -ENAMETOOLONG;
+    }
+  memcpy(parent, path, length);
+  parent[length] = '\0';
+
+  fd = open(parent, O_RDONLY);
+  if (fd < 0)
+    {
+      return -errno;
+    }
+  ret = fsync(fd);
+  saved_errno = errno;
+  close(fd);
+  if (ret < 0)
+    {
+      errno = saved_errno;
+      return -errno;
+    }
+  return 0;
+}
+
+int vg_config_save(const char *path)
+{
+  const vg_config_t *cfg = vg_config();
+  vg_config_t candidate;
+  char tmp_path[VG_PATH_LEN + 32];
+  char reason[96];
+  FILE *fp = NULL;
+  int fd;
+  int ret = -1;
+
+  if (path == NULL || path[0] == '\0' ||
+      strnlen(path, sizeof(tmp_path)) >= sizeof(tmp_path) - 5)
+    {
+      return -EINVAL;
+    }
+
+  candidate = *cfg;
+  if (candidate.config_revision == UINT32_MAX)
+    {
+      return -EOVERFLOW;
+    }
+  candidate.config_revision++;
+  if (vg_config_validate(&candidate, reason, sizeof(reason)) < 0)
+    {
+      return -EINVAL;
+    }
+
+  (void)mkdir(candidate.data_dir, 0755);
+  snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+  fp = fopen(tmp_path, "w");
+  if (fp == NULL)
+    {
+      return -errno;
+    }
+
+  if (fprintf(fp, "{\n  \"schemaVersion\": %" PRIu32 ",\n"
+                  "  \"configRevision\": %" PRIu32 ",\n",
+              candidate.schema_version, candidate.config_revision) < 0 ||
+      vg_config_write_string(fp, "configSignature",
+                             candidate.config_signature, true) < 0 ||
+      vg_config_write_string(fp, "deviceId", candidate.device_id, true) < 0 ||
+      vg_config_write_string(fp, "dataDir", candidate.data_dir, true) < 0 ||
+      vg_config_write_string(fp, "consoleHost", candidate.console_host, true) < 0 ||
+      fprintf(fp, "  \"consolePort\": %d,\n", candidate.console_port) < 0 ||
+      vg_config_write_string(fp, "consolePath", candidate.console_path, true) < 0 ||
+      fprintf(fp, "  \"consoleTls\": %s,\n",
+              candidate.console_tls ? "true" : "false") < 0 ||
+      vg_config_write_string(fp, "consoleServerName",
+                             candidate.console_server_name, true) < 0 ||
+      vg_config_write_string(fp, "consoleCaPath",
+                             candidate.console_ca_path, true) < 0 ||
+      vg_config_write_string(fp, "deviceCertPath",
+                             candidate.device_cert_path, true) < 0 ||
+      vg_config_write_string(fp, "deviceKeyPath",
+                             candidate.device_key_path, true) < 0 ||
+      vg_config_write_string(fp, "deviceToken",
+                             candidate.device_token, true) < 0 ||
+      vg_config_write_string(fp, "webhookUrl",
+                             candidate.webhook_url, true) < 0 ||
+      fprintf(fp, "  \"webhookEnabled\": %s,\n"
+                  "  \"demoMode\": %s,\n"
+                  "  \"confAlarmBeep\": %.6f,\n"
+                  "  \"confWaterFlow\": %.6f,\n"
+                  "  \"confImpact\": %.6f,\n"
+                  "  \"confDistress\": %.6f,\n"
+                  "  \"confNameCall\": %.6f,\n"
+                  "  \"alarmHoldSec\": %" PRIu32 ",\n"
+                  "  \"waterNoticeSec\": %" PRIu32 ",\n"
+                  "  \"waterWarningSec\": %" PRIu32 ",\n"
+                  "  \"warningCountdownSec\": %" PRIu32 ",\n"
+                  "  \"impactRepeatWindowSec\": %" PRIu32 ",\n"
+                  "  \"distressRepeatWindowSec\": %" PRIu32 ",\n"
+                  "  \"snoozeMinutes\": %" PRIu32 ",\n"
+                  "  \"snoozeMaxCount\": %" PRIu32 ",\n"
+                  "  \"eventIdleTimeoutSec\": %" PRIu32 ",\n"
+                  "  \"uploadRetrySec\": %" PRIu32 ",\n"
+                  "  \"uploadQueueMax\": %" PRIu32 "\n}\n",
+              candidate.webhook_enabled ? "true" : "false",
+              candidate.demo_mode ? "true" : "false",
+              (double)candidate.conf_alarm_beep,
+              (double)candidate.conf_water_flow,
+              (double)candidate.conf_impact,
+              (double)candidate.conf_distress,
+              (double)candidate.conf_name_call,
+              candidate.alarm_hold_sec, candidate.water_notice_sec,
+              candidate.water_warning_sec, candidate.warning_countdown_sec,
+              candidate.impact_repeat_window_sec,
+              candidate.distress_repeat_window_sec, candidate.snooze_minutes,
+              candidate.snooze_max_count, candidate.event_idle_timeout_sec,
+              candidate.upload_retry_sec, candidate.upload_queue_max) < 0 ||
+      fflush(fp) != 0)
+    {
+      goto done;
+    }
+
+  fd = fileno(fp);
+  if (fd < 0 || fsync(fd) < 0)
+    {
+      goto done;
+    }
+  if (fclose(fp) != 0)
+    {
+      fp = NULL;
+      goto done;
+    }
+  fp = NULL;
+
+  if (rename(tmp_path, path) < 0)
+    {
+      goto done;
+    }
+
+  if (vg_config_sync_parent(path) < 0)
+    {
+      fprintf(stderr, "[velaguard] 配置目录同步失败，已完成文件替换: %s\n",
+              path);
+    }
+
+  *vg_config() = candidate;
+  ret = 0;
+
+done:
+  if (fp != NULL)
+    {
+      fclose(fp);
+    }
+  if (ret < 0)
+    {
+      unlink(tmp_path);
+    }
+  return ret;
 }
 
 void vg_config_dump(void)

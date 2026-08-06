@@ -6,7 +6,7 @@
  *   1. 板前协议联调：校验结构化事件协议、查看状态流转；
  *   2. 家属通知端：SSE 实时推送事件卡片到家属手机浏览器。
  *
- * 设计取舍：只用 Node.js 内置模块（http + node:sqlite），
+ * 设计取舍：只用 Node.js 内置模块（http/https + node:sqlite），
  * **零 npm 依赖**——演示现场手机开热点即可 `node server.js` 起服务，
  * 不需要联网装包，符合 PRD-06「零公网依赖、零账号审批、零 App 安装」。
  *
@@ -20,30 +20,95 @@
  *   GET    /health        健康检查
  *   GET    /pairing       局域网配对状态
  *   POST   /pairing       使用配对密钥建立家属会话
+ *   DELETE /pairing       注销当前手机会话
  */
 
 'use strict';
 
 const http = require('node:http');
+const https = require('node:https');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.VELAGUARD_PORT || 8080);
-const HOST = process.env.VELAGUARD_HOST || '0.0.0.0';
 const DB_PATH = process.env.VELAGUARD_DB || path.join(__dirname, 'events.db');
 const DEMO_PROFILE = (process.env.VELAGUARD_PROFILE || 'demo') !== 'production';
+const PRODUCTION_TLS_TERMINATED =
+  process.env.VELAGUARD_TLS_TERMINATED === 'true';
+const TLS_CERT_FILE = process.env.VELAGUARD_TLS_CERT_FILE || '';
+const TLS_KEY_FILE = process.env.VELAGUARD_TLS_KEY_FILE || '';
+const NATIVE_TLS = Boolean(TLS_CERT_FILE || TLS_KEY_FILE);
+const TRUSTED_PROXY_ADDRESSES = new Set(
+  (process.env.VELAGUARD_TRUSTED_PROXY || '')
+    .split(',').map((value) => value.trim()).filter(Boolean));
+const HOST = process.env.VELAGUARD_HOST ||
+  (DEMO_PROFILE ? '0.0.0.0' : '127.0.0.1');
 const SESSION_TOKEN = process.env.VELAGUARD_SESSION_TOKEN || '';
 const EXPECTED_DEVICE_ID = process.env.VELAGUARD_DEVICE_ID || '';
+const PAIRING_DEVICE_ID = EXPECTED_DEVICE_ID ||
+  (DEMO_PROFILE ? 'velaguard_demo_001' : '');
+const PAIRING_DEVICE_HINT = PAIRING_DEVICE_ID;
 const COMMAND_ALG = DEMO_PROFILE ? 'demo.none' : 'hmac-sha256';
 const COMMAND_KEY_ID = process.env.VELAGUARD_COMMAND_KEY_ID ||
   (DEMO_PROFILE ? 'demo' : '');
 const COMMAND_SIGNING_KEY = process.env.VELAGUARD_COMMAND_SIGNING_KEY ||
   (DEMO_PROFILE ? 'demo-command-key' : '');
-const PAIRING_KEY = process.env.VELAGUARD_PAIRING_KEY ||
-  (DEMO_PROFILE ? 'velaguard-demo' : '');
+const configuredPairingKey = process.env.VELAGUARD_PAIRING_KEY || '';
+const PAIRING_KEY = configuredPairingKey ||
+  (DEMO_PROFILE ? crypto.randomBytes(6).toString('hex') : '');
+const PAIRING_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const FAMILY_COOKIE = DEMO_PROFILE ? 'vg_session' : '__Host-vg_session';
+const MAX_PAIRING_SESSIONS = 64;
+const PAIRING_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const MAX_PAIRING_FAILURES = 5;
+const MAX_PAIRING_DEVICE_ID_LENGTH = 32;
+const MAX_PAIRING_FAILURE_BUCKETS = 512;
+const MAX_SSE_CLIENTS = 64;
+const MAX_SSE_CLIENTS_PER_TOKEN = 4;
+const MAX_SSE_CLIENTS_PER_ADDRESS = 8;
+const MAX_PRIVACY_DEPTH = 32;
+const MAX_PRIVACY_NODES = 2048;
+const MAX_COMMAND_TTL_MS = 5 * 60 * 1000;
+const MAX_COMMAND_RESULT_REVISION = 1000000;
 const pairingSessions = new Map();
+const pairingAddressFailures = new Map();
+const pairingDeviceFailures = new Map();
+let staticSessionRevoked = false;
+
+if (NATIVE_TLS && (!TLS_CERT_FILE || !TLS_KEY_FILE)) {
+  console.error('原生 HTTPS 必须同时设置 VELAGUARD_TLS_CERT_FILE 和 VELAGUARD_TLS_KEY_FILE');
+  process.exit(2);
+}
+
+if (!DEMO_PROFILE && !NATIVE_TLS && !PRODUCTION_TLS_TERMINATED) {
+  console.error('生产 profile 必须配置原生 HTTPS 证书，或设置 VELAGUARD_TLS_TERMINATED=true 运行在可信 HTTPS 终止层之后');
+  process.exit(2);
+}
+
+if (!DEMO_PROFILE && !NATIVE_TLS && TRUSTED_PROXY_ADDRESSES.size === 0) {
+  console.error('生产反向代理模式必须设置 VELAGUARD_TRUSTED_PROXY（逗号分隔的代理 IP）');
+  process.exit(2);
+}
+
+if (!DEMO_PROFILE && !NATIVE_TLS && !['127.0.0.1', '::1'].includes(HOST)) {
+  console.error('生产反向代理后端必须绑定本机回环地址');
+  process.exit(2);
+}
+
+let TLS_OPTIONS = null;
+if (NATIVE_TLS) {
+  try {
+    TLS_OPTIONS = {
+      key: fs.readFileSync(TLS_KEY_FILE),
+      cert: fs.readFileSync(TLS_CERT_FILE),
+    };
+  } catch (error) {
+    console.error(`读取 HTTPS 证书失败: ${error.message}`);
+    process.exit(2);
+  }
+}
 
 const EVENT_TYPES = new Set([
   'alarm_beep', 'water_flow', 'impact', 'distress_voice', 'name_call_help',
@@ -139,8 +204,13 @@ db.exec(
   'commandId TEXT PRIMARY KEY, deviceId TEXT NOT NULL, eventId TEXT, ' +
   'commandType TEXT NOT NULL, action TEXT, desiredRevision INTEGER, ' +
   'nonce TEXT NOT NULL, issuedAt TEXT NOT NULL, expiresAt TEXT NOT NULL, ' +
-  'status TEXT NOT NULL, resultRevision INTEGER, errorCode TEXT, ' +
+  'status TEXT NOT NULL, resultRevision INTEGER, resultMessageId TEXT, ' +
+  'errorCode TEXT, ' +
   'createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);' +
+  'CREATE TABLE IF NOT EXISTS command_results (' +
+  'deviceId TEXT NOT NULL, commandId TEXT NOT NULL, messageId TEXT NOT NULL, ' +
+  'resultRevision INTEGER NOT NULL, status TEXT NOT NULL, errorCode TEXT, ' +
+  'receivedAt TEXT NOT NULL, PRIMARY KEY (deviceId, commandId, messageId));' +
   'CREATE TABLE IF NOT EXISTS audit_log (' +
   'auditId INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, ' +
   'deviceId TEXT, commandId TEXT, action TEXT NOT NULL, result TEXT NOT NULL, ' +
@@ -150,6 +220,7 @@ db.exec(
 ensureColumn('commands', 'alg', "TEXT NOT NULL DEFAULT 'demo.none'");
 ensureColumn('commands', 'keyId', "TEXT NOT NULL DEFAULT 'demo'");
 ensureColumn('commands', 'signature', "TEXT NOT NULL DEFAULT 'demo-unsigned'");
+ensureColumn('commands', 'resultMessageId', 'TEXT');
 
 const upsertEvent = db.prepare(
   'INSERT INTO events (eventId, deviceId, eventType, level, confidence, ' +
@@ -185,6 +256,10 @@ const insertIngress = db.prepare(
   '(messageId, deviceId, eventId, eventRevision, receivedAt) VALUES (?, ?, ?, ?, ?)');
 const selectCommand = db.prepare(
   'SELECT * FROM commands WHERE commandId = ?');
+const selectCommandsForEvent = db.prepare(
+  'SELECT * FROM commands WHERE eventId = ? ORDER BY updatedAt DESC LIMIT 8');
+const selectCommandResult = db.prepare(
+  'SELECT * FROM command_results WHERE deviceId = ? AND commandId = ? AND messageId = ?');
 const insertCommand = db.prepare(
   'INSERT INTO commands ' +
   '(commandId, deviceId, eventId, commandType, action, desiredRevision, ' +
@@ -196,8 +271,12 @@ const updateCommandReceipt = db.prepare(
   "THEN 'received' ELSE status END, updatedAt = ? " +
   "WHERE commandId = ? AND deviceId = ?");
 const updateCommandResult = db.prepare(
-  'UPDATE commands SET status = ?, resultRevision = ?, errorCode = ?, ' +
-  'updatedAt = ? WHERE commandId = ? AND deviceId = ?');
+  'UPDATE commands SET status = ?, resultRevision = ?, resultMessageId = ?, ' +
+  'errorCode = ?, updatedAt = ? WHERE commandId = ? AND deviceId = ?');
+const insertCommandResult = db.prepare(
+  'INSERT INTO command_results ' +
+  '(deviceId, commandId, messageId, resultRevision, status, errorCode, receivedAt) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?)');
 const insertAudit = db.prepare(
   'INSERT INTO audit_log ' +
   '(actor, deviceId, commandId, action, result, createdAt) ' +
@@ -209,14 +288,39 @@ const insertAudit = db.prepare(
 
 const clients = new Set();
 
-function broadcast(type, payload) {
-  const chunk = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+function closeSseClient(client) {
+  clients.delete(client);
+  if (client.keepalive) clearInterval(client.keepalive);
+  try { client.res.end(); } catch { /* ignore */ }
+}
+
+function closeClientsForToken(token) {
   for (const client of clients) {
+    if (tokenMatches(client.token, token)) closeSseClient(client);
+  }
+}
+
+function clientSessionValid(client) {
+  if (SESSION_TOKEN && tokenMatches(client.token, SESSION_TOKEN)) {
+    return !staticSessionRevoked;
+  }
+  return pairingSessionValid(client.token);
+}
+
+function broadcast(type, payload) {
+  const eventId = payload?.eventId || payload?.commandId || '';
+  const idLine = eventId ? `id: ${eventId}\n` : '';
+  const chunk = `${idLine}event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const client of clients) {
+    if (!clientSessionValid(client)) {
+      closeSseClient(client);
+      continue;
+    }
     if (client.deviceId && client.deviceId !== payload.deviceId) continue;
     try {
-      client.res.write(chunk);
+      if (!client.res.write(chunk)) closeSseClient(client);
     } catch {
-      clients.delete(client);
+      closeSseClient(client);
     }
   }
 }
@@ -237,15 +341,25 @@ const PAYLOAD_FIELDS = new Set([
   'advice',
 ]);
 
-function scanPrivacy(value, path, errors) {
+function scanPrivacy(value, path, errors, depth = 0, state = { nodes: 0 }) {
   if (!isObject(value) && !Array.isArray(value)) return;
+  if (depth > MAX_PRIVACY_DEPTH) {
+    errors.push('负载嵌套层级超过限制');
+    return;
+  }
+  state.nodes++;
+  if (state.nodes > MAX_PRIVACY_NODES) {
+    errors.push('负载字段数量超过限制');
+    return;
+  }
   for (const [key, child] of Object.entries(value)) {
     const lower = key.toLowerCase();
     if (FORBIDDEN_FIELDS.some((name) => lower === name.toLowerCase()) ||
+        /audio|pcm|wav|transcript|rawtext|dialog|recording|speech|voice/.test(lower) ||
         /password|passwd|token|secret|privatekey|credential|certificate/.test(lower)) {
       errors.push('隐私红线：不允许字段 ' + path + key);
     }
-    scanPrivacy(child, path + key + '.', errors);
+    scanPrivacy(child, path + key + '.', errors, depth + 1, state);
   }
 }
 
@@ -432,15 +546,56 @@ function rowV1(payload, metadata, now, existing) {
 const DEVICE_TOKEN = process.env.VELAGUARD_DEVICE_TOKEN ||
   (DEMO_PROFILE ? 'demo-token' : '');
 const ALLOWED_ORIGIN = process.env.VELAGUARD_CORS_ORIGIN || '';
-const DEMO_ALLOW_ANONYMOUS = DEMO_PROFILE &&
-  process.env.VELAGUARD_ALLOW_ANONYMOUS !== 'false';
+const DEMO_ALLOW_ANONYMOUS_DEVICE = DEMO_PROFILE &&
+  process.env.VELAGUARD_ALLOW_ANONYMOUS_DEVICE === 'true';
+
+function cookieValue(req, name) {
+  const header = String(req.headers.cookie || '');
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    const value = part.slice(separator + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function isTrustedProxy(req) {
+  const remoteAddress = String(req.socket?.remoteAddress || '');
+  if (TRUSTED_PROXY_ADDRESSES.has(remoteAddress)) return true;
+  return remoteAddress.startsWith('::ffff:') &&
+    TRUSTED_PROXY_ADDRESSES.has(remoteAddress.slice('::ffff:'.length));
+}
+
+function requestIsSecure(req) {
+  if (req.socket?.encrypted) return true;
+  if (!PRODUCTION_TLS_TERMINATED || !isTrustedProxy(req)) return false;
+  return String(req.headers['x-forwarded-proto'] || '').trim().toLowerCase() ===
+    'https';
+}
+
+function transportHeaders(req) {
+  return !DEMO_PROFILE && requestIsSecure(req)
+    ? { 'Strict-Transport-Security': 'max-age=31536000' }
+    : {};
+}
+
+function sessionCookie(req, token, maxAge) {
+  return `${FAMILY_COOKIE}=${token ? encodeURIComponent(token) : ''}; ` +
+    `HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}` +
+    (requestIsSecure(req) ? '; Secure' : '');
+}
 
 function tokenFromRequest(req) {
   const auth = req.headers.authorization || '';
   if (auth.startsWith('Bearer ')) return auth.slice(7);
-  const queryToken = new URL(req.url || '/', 'http://localhost')
-    .searchParams.get('session');
-  return queryToken || String(req.headers['x-velaguard-device-token'] || '');
+  const deviceToken = String(req.headers['x-velaguard-device-token'] || '');
+  if (deviceToken) return deviceToken;
+  return cookieValue(req, FAMILY_COOKIE);
 }
 
 function tokenMatches(actual, expected) {
@@ -451,10 +606,20 @@ function tokenMatches(actual, expected) {
 }
 
 function issuePairingSession(deviceId) {
+  const now = Date.now();
+  for (const [token, session] of pairingSessions) {
+    if (session.expiresAt <= now) revokePairingSession(token);
+  }
+  while (pairingSessions.size >= MAX_PAIRING_SESSIONS) {
+    const oldest = pairingSessions.keys().next().value;
+    if (oldest == null) break;
+    revokePairingSession(oldest);
+  }
+
   const token = crypto.randomBytes(24).toString('base64url');
   pairingSessions.set(token, {
     deviceId,
-    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    expiresAt: now + PAIRING_SESSION_TTL_MS,
   });
   return token;
 }
@@ -462,21 +627,104 @@ function issuePairingSession(deviceId) {
 function pairingSessionValid(token) {
   const session = pairingSessions.get(token);
   if (!session || session.expiresAt <= Date.now()) {
-    if (session) pairingSessions.delete(token);
+    if (session) revokePairingSession(token);
     return false;
   }
   return true;
 }
 
+function revokePairingSession(token) {
+  const revoked = pairingSessions.delete(token);
+  if (revoked) closeClientsForToken(token);
+  return revoked;
+}
+
+function requestClientAddress(req) {
+  if (PRODUCTION_TLS_TERMINATED && isTrustedProxy(req)) {
+    const forwarded = String(req.headers['x-forwarded-for'] || '')
+      .split(',').map((value) => value.trim()).filter(Boolean);
+    if (forwarded.length) return forwarded[0];
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function pairingFailureKeys(req, deviceId = '') {
+  const address = requestClientAddress(req);
+  return {
+    address,
+    device: deviceId ? `${address}|${deviceId}` : '',
+  };
+}
+
+function pairingFailureEntries(req, deviceId) {
+  const keys = pairingFailureKeys(req, deviceId);
+  const entries = [{ map: pairingAddressFailures, key: keys.address }];
+  if (keys.device) {
+    entries.push({ map: pairingDeviceFailures, key: keys.device });
+  }
+  return entries;
+}
+
+function pairingAttemptAllowed(req, deviceId) {
+  const now = Date.now();
+  return pairingFailureEntries(req, deviceId).every(({ map, key }) => {
+    const entry = map.get(key);
+    if (!entry || entry.resetAt <= now) {
+      if (entry) map.delete(key);
+      return true;
+    }
+    return entry.count < MAX_PAIRING_FAILURES;
+  });
+}
+
+function recordPairingFailure(req, deviceId) {
+  const now = Date.now();
+  for (const { map, key } of pairingFailureEntries(req, deviceId)) {
+    const entry = map.get(key);
+    if (!entry || entry.resetAt <= now) {
+      while (map.size >= MAX_PAIRING_FAILURE_BUCKETS) {
+        const oldest = map.keys().next().value;
+        if (oldest == null) break;
+        map.delete(oldest);
+      }
+      map.set(key, {
+        count: 1,
+        resetAt: now + PAIRING_FAILURE_WINDOW_MS,
+      });
+    } else {
+      entry.count++;
+    }
+  }
+}
+
+function clearPairingFailures(req, deviceId) {
+  for (const { map, key } of pairingFailureEntries(req, deviceId)) {
+    map.delete(key);
+  }
+}
+
+function sseAdmissionAllowed(req, token) {
+  if (clients.size >= MAX_SSE_CLIENTS) return false;
+
+  const address = requestClientAddress(req);
+  let tokenCount = 0;
+  let addressCount = 0;
+  for (const client of clients) {
+    if (tokenMatches(client.token, token)) tokenCount++;
+    if (client.address === address) addressCount++;
+  }
+  return tokenCount < MAX_SSE_CLIENTS_PER_TOKEN &&
+    addressCount < MAX_SSE_CLIENTS_PER_ADDRESS;
+}
+
 function authorizedDevice(req, deviceId) {
   if (!idOk(deviceId)) return false;
-  if (!DEMO_PROFILE && (!EXPECTED_DEVICE_ID ||
-                        deviceId !== EXPECTED_DEVICE_ID)) {
+  if (PAIRING_DEVICE_ID && deviceId !== PAIRING_DEVICE_ID) {
     return false;
   }
   const token = tokenFromRequest(req);
   if (DEVICE_TOKEN && tokenMatches(token, DEVICE_TOKEN)) return true;
-  if (DEMO_ALLOW_ANONYMOUS && !token) {
+  if (DEMO_ALLOW_ANONYMOUS_DEVICE && !token) {
     console.warn('[console] 演示模式允许匿名设备接入，仅限局域网演示');
     return true;
   }
@@ -485,22 +733,34 @@ function authorizedDevice(req, deviceId) {
 
 function authorizedSession(req) {
   const token = tokenFromRequest(req);
-  if (SESSION_TOKEN && tokenMatches(token, SESSION_TOKEN)) return true;
+  if (SESSION_TOKEN && tokenMatches(token, SESSION_TOKEN) &&
+      !staticSessionRevoked) {
+    return DEMO_PROFILE || Boolean(EXPECTED_DEVICE_ID);
+  }
   if (pairingSessionValid(token)) return true;
-  return DEMO_ALLOW_ANONYMOUS && !token;
+  return false;
 }
 
 function sessionDeviceId(req) {
   const token = tokenFromRequest(req);
   const session = pairingSessions.get(token);
-  if (!session || session.expiresAt <= Date.now()) return null;
-  return session.deviceId;
+  if (session && session.expiresAt > Date.now()) return session.deviceId;
+  if (SESSION_TOKEN && tokenMatches(token, SESSION_TOKEN) &&
+      !staticSessionRevoked) {
+    return EXPECTED_DEVICE_ID || null;
+  }
+  return null;
 }
 
 function authorizedSessionForDevice(req, deviceId) {
   if (!authorizedSession(req)) return false;
+  const token = tokenFromRequest(req);
   const pairedDeviceId = sessionDeviceId(req);
-  return !pairedDeviceId || pairedDeviceId === deviceId;
+  if (pairedDeviceId) return pairedDeviceId === deviceId;
+  if (SESSION_TOKEN && tokenMatches(token, SESSION_TOKEN)) {
+    return Boolean(EXPECTED_DEVICE_ID) && EXPECTED_DEVICE_ID === deviceId;
+  }
+  return true;
 }
 
 function corsHeaders(req) {
@@ -508,10 +768,25 @@ function corsHeaders(req) {
   if (origin && ALLOWED_ORIGIN && origin === ALLOWED_ORIGIN) {
     return {
       'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Credentials': 'true',
       Vary: 'Origin',
     };
   }
   return { Vary: 'Origin' };
+}
+
+function csrfAllowed(req) {
+  if (!['POST', 'PATCH', 'DELETE'].includes(req.method)) return true;
+  const hasCookie = Boolean(cookieValue(req, FAMILY_COOKIE));
+  const hasExplicitToken = Boolean(req.headers.authorization) ||
+    Boolean(req.headers['x-velaguard-device-token']);
+  if (!hasCookie || hasExplicitToken) return true;
+
+  const origin = String(req.headers.origin || '');
+  if (!origin || origin === 'null') return false;
+  const expected = `${requestIsSecure(req) ? 'https' : 'http'}://` +
+    `${req.headers.host || ''}`;
+  return origin === expected || (ALLOWED_ORIGIN && origin === ALLOWED_ORIGIN);
 }
 
 function send(res, code, body, headers = {}) {
@@ -519,9 +794,10 @@ function send(res, code, body, headers = {}) {
   res.writeHead(code, {
     'Content-Type': typeof body === 'string'
       ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
-    'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
+    'Access-Control-Allow-Methods': 'DELETE,GET,POST,PATCH,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-VelaGuard-Device-Token, Idempotency-Key',
     ...corsHeaders(res.req || { headers: {} }),
+    ...transportHeaders(res.req || { headers: {}, socket: {} }),
     ...headers,
   });
   res.end(data);
@@ -546,16 +822,29 @@ function readBody(req) {
 
 function serveStatic(res, urlPath) {
   const file = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '');
-  const full = path.join(__dirname, 'public', file);
-  if (!full.startsWith(path.join(__dirname, 'public'))) {
+  const publicRoot = path.resolve(__dirname, 'public');
+  const full = path.resolve(publicRoot, file);
+  let realRoot;
+  let realFull;
+  try {
+    realRoot = fs.realpathSync(publicRoot);
+    realFull = fs.realpathSync(full);
+  } catch {
+    return send(res, 404, '未找到');
+  }
+  const relative = path.relative(realRoot, realFull);
+  if (relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
     return send(res, 403, '禁止访问');
   }
-  fs.readFile(full, (err, data) => {
+  fs.readFile(realFull, (err, data) => {
     if (err) return send(res, 404, '未找到');
-    const ext = path.extname(full);
+    const ext = path.extname(realFull);
     const mime = { '.html': 'text/html', '.js': 'text/javascript',
       '.css': 'text/css', '.json': 'application/json' }[ext] || 'text/plain';
-    res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` });
+    res.writeHead(200, {
+      'Content-Type': `${mime}; charset=utf-8`,
+      ...transportHeaders(res.req || { headers: {}, socket: {} }),
+    });
     res.end(data);
   });
 }
@@ -576,14 +865,15 @@ function eventIngressAck(metadata, accepted, duplicate, errorCode = null) {
   };
 }
 
-function commandResultAck(deviceId, commandId, messageId, accepted,
-                          duplicate, errorCode = null) {
+function commandResultAck(deviceId, commandId, messageId, resultRevision,
+                          accepted, duplicate, errorCode = null) {
   return {
     schema: ACK_SCHEMA,
     messageType: 'commandResultIngressAck',
     messageId,
     deviceId,
     commandId,
+    resultRevision,
     accepted,
     duplicate,
     serverTime: nowIso(),
@@ -653,6 +943,7 @@ function commandView(command) {
     keyId: command.keyId || (DEMO_PROFILE ? 'demo' : ''),
     signature: command.signature || (DEMO_PROFILE ? 'demo-unsigned' : ''),
     resultRevision: command.resultRevision,
+    resultMessageId: command.resultMessageId,
     errorCode: command.errorCode,
     createdAt: command.createdAt,
     updatedAt: command.updatedAt,
@@ -672,7 +963,12 @@ function createCommand(event, body, actor) {
   const nonce = body.nonce || 'nonce_' + Date.now().toString(36);
   const desiredRevision = body.desiredRevision == null
     ? event.eventRevision : body.desiredRevision;
-  const expiresAt = body.expiresAt || new Date(Date.now() + 120000).toISOString();
+  const expiresAtRaw = body.expiresAt ||
+    new Date(Date.now() + 120000).toISOString();
+  const expiresAtMs = typeof expiresAtRaw === 'string'
+    ? Date.parse(expiresAtRaw) : NaN;
+  const expiresAt = Number.isNaN(expiresAtMs)
+    ? expiresAtRaw : new Date(expiresAtMs).toISOString();
   const action = body.action;
 
   if (!idOk(commandId) || commandId.length > 64 ||
@@ -680,8 +976,8 @@ function createCommand(event, body, actor) {
       !ACTION_TYPES.has(action) ||
       !Number.isInteger(desiredRevision) || desiredRevision <= 0 ||
       desiredRevision !== event.eventRevision ||
-      Number.isNaN(Date.parse(expiresAt)) ||
-      Date.parse(expiresAt) <= Date.now()) {
+      Number.isNaN(expiresAtMs) || expiresAtMs <= Date.now() ||
+      expiresAtMs > Date.now() + MAX_COMMAND_TTL_MS) {
     return { error: '命令字段、修订号或有效期非法', code: 400 };
   }
   if (action === 'snooze' && event.level === 'emergency') {
@@ -703,6 +999,7 @@ function createCommand(event, body, actor) {
     expiresAt,
     status: 'requested',
     resultRevision: null,
+    resultMessageId: null,
     errorCode: null,
     createdAt: now,
     updatedAt: now,
@@ -734,9 +1031,27 @@ function createCommand(event, body, actor) {
   return { command, duplicate: false };
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+async function handleRequest(req, res) {
+  const secure = requestIsSecure(req);
+  const scheme = secure ? 'https' : 'http';
+  const url = new URL(req.url, `${scheme}://${req.headers.host || 'localhost'}`);
   const { pathname } = url;
+
+  if (!DEMO_PROFILE && !secure) {
+    return send(res, 421, {
+      ok: false,
+      errorCode: 'https_required',
+      error: '生产控制台只接受 HTTPS 请求',
+    });
+  }
+
+  if (!csrfAllowed(req)) {
+    return send(res, 403, {
+      ok: false,
+      errorCode: 'csrf_origin_required',
+      error: 'Cookie 会话的写操作必须来自受信 Origin',
+    });
+  }
 
   if (req.method === 'OPTIONS') return send(res, 204, '');
 
@@ -745,40 +1060,94 @@ const server = http.createServer(async (req, res) => {
     if (!authorizedSession(req)) {
       return send(res, 401, { ok: false, error: '需要家属会话授权' });
     }
+    const token = tokenFromRequest(req);
+    if (!sseAdmissionAllowed(req, token)) {
+      return send(res, 429, {
+        ok: false,
+        errorCode: 'sse_connection_limit',
+        error: '实时连接数已达到上限，请关闭重复页面后重试',
+      }, {
+        'Cache-Control': 'no-store',
+        'Retry-After': '60',
+      });
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       'Referrer-Policy': 'no-referrer',
       Connection: 'keep-alive',
       ...corsHeaders(req),
+      ...transportHeaders(req),
     });
-    res.write(`event: hello\ndata: ${JSON.stringify({ ok: true })}\n\n`);
-    const client = { res, deviceId: sessionDeviceId(req) };
+    if (!res.write(`event: hello\ndata: ${JSON.stringify({ ok: true })}\n\n`)) {
+      res.end();
+      return undefined;
+    }
+    const client = {
+      res,
+      deviceId: sessionDeviceId(req),
+      token,
+      address: requestClientAddress(req),
+    };
     clients.add(client);
-    const ka = setInterval(() => {
-      try { res.write(': keepalive\n\n'); } catch { /* ignore */ }
+    client.keepalive = setInterval(() => {
+      if (!clientSessionValid(client)) {
+        closeSseClient(client);
+        return;
+      }
+      try {
+        if (!res.write(': keepalive\n\n')) closeSseClient(client);
+      } catch {
+        closeSseClient(client);
+      }
     }, 15000);
-    req.on('close', () => { clearInterval(ka); clients.delete(client); });
+    req.on('close', () => { closeSseClient(client); });
     return undefined;
   }
 
   if (req.method === 'GET' && pathname === '/health') {
-    return send(res, 200, {
+    const health = {
       ok: true,
       profile: DEMO_PROFILE ? 'demo' : 'production',
       warning: DEMO_PROFILE ? '演示 profile：请勿暴露到公网' : undefined,
-      clients: clients.size,
-      events: db.prepare('SELECT COUNT(*) AS n FROM events').get().n,
-    });
+    };
+    if (DEMO_PROFILE) {
+      health.clients = clients.size;
+      health.events = db.prepare('SELECT COUNT(*) AS n FROM events').get().n;
+    }
+    return send(res, 200, health);
   }
 
   if (pathname === '/pairing' && req.method === 'GET') {
+    const token = tokenFromRequest(req);
+    const paired = pairingSessionValid(token);
     return send(res, 200, {
       ok: true,
       profile: DEMO_PROFILE ? 'demo' : 'production',
-      deviceId: EXPECTED_DEVICE_ID || null,
+      deviceId: PAIRING_DEVICE_HINT || null,
       keyRequired: !DEMO_PROFILE || Boolean(PAIRING_KEY),
-      expiresInSec: 24 * 60 * 60,
+      paired,
+      pairedDeviceId: paired ? sessionDeviceId(req) : null,
+      expiresInSec: PAIRING_SESSION_TTL_MS / 1000,
+    }, {
+      'Cache-Control': 'no-store',
+    });
+  }
+
+  if (pathname === '/pairing' && req.method === 'DELETE') {
+    const token = tokenFromRequest(req);
+    let revoked = revokePairingSession(token);
+    if (SESSION_TOKEN && tokenMatches(token, SESSION_TOKEN)) {
+      staticSessionRevoked = true;
+      closeClientsForToken(token);
+      revoked = true;
+    }
+    return send(res, 200, {
+      ok: true,
+      revoked,
+    }, {
+      'Cache-Control': 'no-store',
+      'Set-Cookie': sessionCookie(req, '', 0),
     });
   }
 
@@ -790,20 +1159,38 @@ const server = http.createServer(async (req, res) => {
       return send(res, 400, { ok: false, errorCode: 'invalid_json' });
     }
 
-    const deviceId = isObject(body) && idOk(body.deviceId) ? body.deviceId : '';
+    const deviceId = isObject(body) && idOk(body.deviceId) &&
+      body.deviceId.length <= MAX_PAIRING_DEVICE_ID_LENGTH ? body.deviceId : '';
     const key = isObject(body) && typeof body.key === 'string' ? body.key : '';
+    if (!pairingAttemptAllowed(req, deviceId)) {
+      return send(res, 429, {
+        ok: false,
+        errorCode: 'pairing_rate_limited',
+      }, {
+        'Cache-Control': 'no-store',
+        'Retry-After': String(PAIRING_FAILURE_WINDOW_MS / 1000),
+      });
+    }
     if (!deviceId || !PAIRING_KEY || !tokenMatches(key, PAIRING_KEY) ||
-        (EXPECTED_DEVICE_ID && deviceId !== EXPECTED_DEVICE_ID)) {
-      return send(res, 401, { ok: false, errorCode: 'pairing_rejected' });
+        (PAIRING_DEVICE_ID && deviceId !== PAIRING_DEVICE_ID)) {
+      recordPairingFailure(req, deviceId);
+      return send(res, 401, {
+        ok: false,
+        errorCode: 'pairing_rejected',
+      }, { 'Cache-Control': 'no-store' });
     }
 
+    clearPairingFailures(req, deviceId);
     const sessionToken = issuePairingSession(deviceId);
     return send(res, 200, {
       ok: true,
       paired: true,
       deviceId,
-      sessionToken,
-      expiresInSec: 24 * 60 * 60,
+      expiresInSec: PAIRING_SESSION_TTL_MS / 1000,
+    }, {
+      'Cache-Control': 'no-store',
+      'Set-Cookie': sessionCookie(req, sessionToken,
+                                  PAIRING_SESSION_TTL_MS / 1000),
     });
   }
 
@@ -893,16 +1280,24 @@ const server = http.createServer(async (req, res) => {
     if (!authorizedSession(req)) {
       return send(res, 401, { ok: false, error: '需要家属会话授权' });
     }
-    const limit = Math.min(Number(url.searchParams.get('limit') || 100), 500);
+    const rawLimit = url.searchParams.get('limit');
+    const limit = rawLimit == null ? 100 : Number(rawLimit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      return send(res, 400, {
+        ok: false,
+        errorCode: 'invalid_limit',
+        error: 'limit 必须是 1 到 500 的整数',
+      }, { 'Cache-Control': 'no-store' });
+    }
     const deviceId = sessionDeviceId(req);
     return send(res, 200, {
       ok: true,
       events: deviceId ? selectManyForDevice.all(deviceId, limit) : selectMany.all(limit),
-    });
+    }, { 'Cache-Control': 'no-store' });
   }
 
   const commandPath = pathname.match(/^\/events\/([\w.-]+)\/commands$/);
-  if (req.method === 'POST' && commandPath) {
+  if ((req.method === 'GET' || req.method === 'POST') && commandPath) {
     if (!authorizedSession(req)) {
       return send(res, 401, { ok: false, error: '需要家属会话授权' });
     }
@@ -910,6 +1305,12 @@ const server = http.createServer(async (req, res) => {
     if (!event) return send(res, 404, { ok: false, error: '未找到事件' });
     if (!authorizedSessionForDevice(req, event.deviceId)) {
       return send(res, 403, { ok: false, error: '会话未授权此设备' });
+    }
+    if (req.method === 'GET') {
+      return send(res, 200, {
+        ok: true,
+        commands: selectCommandsForEvent.all(event.eventId).map(commandView),
+      }, { 'Cache-Control': 'no-store' });
     }
     let body;
     try {
@@ -949,7 +1350,9 @@ const server = http.createServer(async (req, res) => {
     }
     const commands = db.prepare(
       'SELECT * FROM commands WHERE deviceId = ? AND status = ? ' +
-      'ORDER BY createdAt ASC LIMIT 32').all(deviceId, 'requested');
+      'AND julianday(expiresAt) > julianday(?) ' +
+      'ORDER BY createdAt ASC LIMIT 32')
+      .all(deviceId, 'requested', nowIso());
     return send(res, 200, { ok: true, commands: commands.map(commandView) });
   }
 
@@ -1011,27 +1414,70 @@ const server = http.createServer(async (req, res) => {
     if (!isObject(body)) {
       return send(res, 400, { ok: false, errorCode: 'invalid_command_result' });
     }
-    const command = selectCommand.get(body.commandId);
     const allowedResults = new Set([
       'received', 'applied', 'rejected', 'requires_local_confirmation',
       'expired', 'stale', 'duplicate', 'failed',
     ]);
-    if (!command || command.deviceId !== deviceId ||
-        !idOk(body.commandId) || !allowedResults.has(body.status) ||
-        (body.errorCode != null && !textOk(body.errorCode, 64)) ||
-        (body.messageId != null && !idOk(body.messageId)) ||
-        (body.resultRevision != null &&
-         (!Number.isInteger(body.resultRevision) || body.resultRevision <= 0))) {
+    if (!idOk(body.commandId) || !allowedResults.has(body.status) ||
+        !idOk(body.messageId) || body.messageId.length > 64 ||
+        !Number.isSafeInteger(body.resultRevision) ||
+        body.resultRevision <= 0 ||
+        body.resultRevision > MAX_COMMAND_RESULT_REVISION ||
+        (body.errorCode != null && !textOk(body.errorCode, 64))) {
       return send(res, 400, { ok: false, errorCode: 'invalid_command_result' });
     }
-    const messageId = idOk(body.messageId) ? body.messageId : body.commandId;
-    const duplicate = command.status === body.status &&
-      command.resultRevision === (body.resultRevision ?? null);
+    const command = selectCommand.get(body.commandId);
+    if (!command || command.deviceId !== deviceId) {
+      return send(res, 404, { ok: false, errorCode: 'command_not_found' });
+    }
+    const messageId = body.messageId;
+    const resultRevision = body.resultRevision;
+    const priorResult = selectCommandResult.get(deviceId, body.commandId,
+                                                messageId);
+    if (priorResult) {
+      if (priorResult.resultRevision !== resultRevision ||
+          priorResult.status !== body.status ||
+          priorResult.errorCode !== (body.errorCode || null)) {
+        return send(res, 409, {
+          ok: false,
+          errorCode: 'command_result_message_conflict',
+          command: commandView(command),
+        });
+      }
+      return send(res, 200, {
+        ok: true,
+        ack: commandResultAck(deviceId, body.commandId, messageId,
+                              resultRevision, true, true),
+        command: commandView(command),
+      });
+    }
+    if (command.resultRevision != null &&
+        resultRevision < command.resultRevision) {
+      return send(res, 409, {
+        ok: false,
+        errorCode: 'stale_command_result',
+        command: commandView(command),
+      });
+    }
+    const duplicate = command.resultRevision === resultRevision &&
+      command.resultMessageId === messageId &&
+      command.status === body.status &&
+      command.errorCode === (body.errorCode || null);
+    if (command.resultRevision === resultRevision && !duplicate) {
+      return send(res, 409, {
+        ok: false,
+        errorCode: 'command_result_conflict',
+        command: commandView(command),
+      });
+    }
     if (!duplicate) {
       const now = nowIso();
       db.exec('BEGIN');
       try {
-        updateCommandResult.run(body.status, body.resultRevision ?? null,
+        insertCommandResult.run(deviceId, body.commandId, messageId,
+                                resultRevision, body.status,
+                                body.errorCode || null, now);
+        updateCommandResult.run(body.status, resultRevision, messageId,
                                 body.errorCode || null, now,
                                 body.commandId, deviceId);
         insertAudit.run('device', deviceId, body.commandId,
@@ -1042,11 +1488,13 @@ const server = http.createServer(async (req, res) => {
         return send(res, 503, { ok: false, errorCode: 'store_unavailable' });
       }
     }
+    const savedCommand = selectCommand.get(body.commandId);
+    broadcast('command-result', commandView(savedCommand));
     return send(res, 200, {
       ok: true,
       ack: commandResultAck(deviceId, body.commandId, messageId,
-                            true, duplicate),
-      command: commandView(selectCommand.get(body.commandId)),
+                            resultRevision, true, duplicate),
+      command: commandView(savedCommand),
     });
   }
 
@@ -1095,7 +1543,10 @@ const server = http.createServer(async (req, res) => {
       return send(res, 403, { ok: false, error: '会话未授权此设备' });
     }
 
-    if (req.method === 'GET') return send(res, 200, { ok: true, event: found });
+    if (req.method === 'GET') {
+      return send(res, 200, { ok: true, event: found },
+                  { 'Cache-Control': 'no-store' });
+    }
 
     if (req.method === 'PATCH') {
       return send(res, 409, {
@@ -1107,12 +1558,31 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET') return serveStatic(res, pathname);
   return send(res, 405, { ok: false, error: '方法不支持' });
-});
+}
+
+const server = NATIVE_TLS
+  ? https.createServer({
+      ...TLS_OPTIONS,
+      minVersion: 'TLSv1.2',
+    }, handleRequest)
+  : http.createServer(handleRequest);
 
 server.listen(PORT, HOST, () => {
+  const scheme = NATIVE_TLS ? 'https' : 'http';
+  const familyScheme = NATIVE_TLS || (!DEMO_PROFILE && PRODUCTION_TLS_TERMINATED)
+    ? 'https' : 'http';
   console.log('安聆 VelaGuard 通知控制台已启动');
-  console.log(`  监听      : http://${HOST}:${PORT}`);
-  console.log(`  家属视角  : http://<本机局域网IP>:${PORT}/`);
+  console.log(`  传输      : ${NATIVE_TLS ? '原生 HTTPS' : 'HTTP（仅演示或可信 TLS 终止层内）'}`);
+  console.log(`  监听      : ${scheme}://${HOST}:${PORT}`);
+  console.log(`  家属视角  : ${familyScheme}://<本机局域网IP>:${PORT}/`);
   console.log(`  数据库    : ${DB_PATH}`);
   console.log('  提示      : 演示时手机与设备连同一热点即可，无需公网');
+  if (DEMO_PROFILE) {
+    console.log(`  配对设备编号: ${PAIRING_DEVICE_HINT}`);
+  }
+  if (DEMO_PROFILE && !configuredPairingKey) {
+    console.log(`  本次演示配对密钥: ${PAIRING_KEY}`);
+  } else if (DEMO_PROFILE) {
+    console.log('  演示配对密钥: 已由 VELAGUARD_PAIRING_KEY 环境变量提供');
+  }
 });

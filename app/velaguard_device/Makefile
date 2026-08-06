@@ -35,6 +35,7 @@ CSRCS += hardware_adapter/vg_input.c
 CSRCS += hardware_adapter/vg_diagnostics.c
 CSRCS += hardware_adapter/vg_ui.c
 CSRCS += hardware_adapter/vg_ui_lvgl.c
+CSRCS += hardware_adapter/vg_wifi.c
 CSRCS += velaguard_daemon.c
 
 MAINSRC = velaguard_main.c

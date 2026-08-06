@@ -9,7 +9,7 @@
 ```bash
 cd tests
 make            # 编译 build/velaguard（主机版）与 build/vg_featdump
-make test       # 跑完整回归（21 项断言，环境完整时）
+make test       # 跑完整回归（当前 49 项断言，环境完整时）
 make clean
 ```
 

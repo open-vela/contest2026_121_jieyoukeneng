@@ -33,7 +33,11 @@ typedef enum
   VG_ACT_SCROLL_DOWN,
   VG_ACT_TEST_MIC,
   VG_ACT_TEST_SPEAKER,
-  VG_ACT_TEST_NETWORK
+  VG_ACT_TEST_NETWORK,
+  VG_ACT_WIFI_SCAN,
+  VG_ACT_WIFI_SELECT,
+  VG_ACT_WIFI_CONNECT,
+  VG_ACT_BINDING
 } vg_action_t;
 
 int  vg_input_init(void);

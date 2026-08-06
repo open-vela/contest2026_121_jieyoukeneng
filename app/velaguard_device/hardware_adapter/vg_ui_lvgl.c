@@ -31,6 +31,7 @@
 #include "velaguard/vg_types.h"
 #include "velaguard/vg_ui.h"
 #include "velaguard/vg_ui_lvgl.h"
+#include "velaguard/vg_wifi.h"
 
 /****************************************************************************
  * Private Data
@@ -39,16 +40,25 @@
 #ifndef __NuttX__
 static pthread_t         g_thread;
 #endif
+static pthread_mutex_t   g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t    g_lifecycle_cond = PTHREAD_COND_INITIALIZER;
+static bool              g_thread_started;
+static bool              g_thread_exited = true;
 static pid_t             g_task;
 static volatile bool     g_running;
 static lv_obj_t         *g_label;
 static lv_obj_t         *g_clock;
 static lv_obj_t         *g_bar;
+static lv_obj_t         *g_wifi_ssid;
+static lv_obj_t         *g_wifi_password;
+static lv_obj_t         *g_wifi_keyboard;
 static lv_obj_t         *g_buttons[5];
 static lv_obj_t         *g_button_labels[5];
 static vg_action_t       g_button_actions[5];
 static lv_nuttx_result_t g_result;
 static unsigned int      g_feedback_ticks;
+static char              g_wifi_synced_ssid[VG_WIFI_SSID_LEN];
+static bool               g_wifi_ssid_dirty;
 
 extern const lv_font_t lv_font_simsun_16_cjk;
 
@@ -78,34 +88,211 @@ static uint32_t vg_level_color(void)
     }
 }
 
+static void vg_lvgl_thread_exited(void)
+{
+  pthread_mutex_lock(&g_lifecycle_lock);
+  g_thread_exited = true;
+  pthread_cond_broadcast(&g_lifecycle_cond);
+  pthread_mutex_unlock(&g_lifecycle_lock);
+}
+
+static void vg_lvgl_wifi_hide_keyboard(void)
+{
+  if (g_wifi_keyboard == NULL)
+    {
+      return;
+    }
+
+  lv_keyboard_set_textarea(g_wifi_keyboard, NULL);
+  lv_obj_add_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void vg_lvgl_wifi_textarea_event(lv_event_t *event)
+{
+  lv_event_code_t code = lv_event_get_code(event);
+  lv_obj_t *target = lv_event_get_target(event);
+
+  if (code == LV_EVENT_VALUE_CHANGED && target == g_wifi_ssid)
+    {
+      g_wifi_ssid_dirty = true;
+    }
+
+  if (code == LV_EVENT_FOCUSED && g_wifi_keyboard != NULL)
+    {
+      lv_keyboard_set_textarea(g_wifi_keyboard, target);
+      lv_obj_clear_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void vg_lvgl_wifi_keyboard_event(lv_event_t *event)
+{
+  lv_event_code_t code = lv_event_get_code(event);
+
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+    {
+      vg_lvgl_wifi_hide_keyboard();
+    }
+}
+
+static void vg_lvgl_sync_wifi_selection(void)
+{
+  vg_wifi_status_t status;
+
+  if (g_wifi_ssid == NULL || vg_wifi_get_status(&status) < 0)
+    {
+      return;
+    }
+
+  if (!g_wifi_ssid_dirty && strcmp(status.ssid, g_wifi_synced_ssid) != 0)
+    {
+      lv_textarea_set_text(g_wifi_ssid, status.ssid);
+      snprintf(g_wifi_synced_ssid, sizeof(g_wifi_synced_ssid), "%s",
+               status.ssid);
+      g_wifi_ssid_dirty = false;
+    }
+}
+
+static void vg_lvgl_refresh_wifi_controls(void)
+{
+  bool network_page = vg_ui_page() == VG_PAGE_NETWORK;
+  bool keyboard_visible = g_wifi_keyboard != NULL &&
+                          !lv_obj_has_flag(g_wifi_keyboard,
+                                           LV_OBJ_FLAG_HIDDEN);
+
+  if (g_wifi_ssid == NULL || g_wifi_password == NULL ||
+      g_wifi_keyboard == NULL)
+    {
+      return;
+    }
+
+  if (!network_page)
+    {
+      lv_obj_add_flag(g_wifi_ssid, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(g_wifi_password, LV_OBJ_FLAG_HIDDEN);
+      lv_textarea_set_text(g_wifi_password, "");
+      vg_lvgl_wifi_hide_keyboard();
+      lv_obj_set_pos(g_label, 6, 28);
+      lv_obj_set_size(g_label, LV_PCT(96), 158);
+      if (vg_ui_page() == VG_PAGE_BINDING)
+        {
+          lv_obj_add_flag(g_clock, LV_OBJ_FLAG_HIDDEN);
+        }
+      else
+        {
+          lv_obj_clear_flag(g_clock, LV_OBJ_FLAG_HIDDEN);
+        }
+      return;
+    }
+
+  lv_obj_clear_flag(g_wifi_ssid, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(g_wifi_password, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_pos(g_label, 6, 9);
+  lv_obj_set_size(g_label, LV_PCT(96), keyboard_visible ? 22 : 70);
+  lv_obj_set_pos(g_wifi_ssid, 5, keyboard_visible ? 36 : 82);
+  lv_obj_set_pos(g_wifi_password, 5, keyboard_visible ? 63 : 109);
+  lv_obj_set_pos(g_wifi_keyboard, 0, 95);
+  lv_obj_add_flag(g_clock, LV_OBJ_FLAG_HIDDEN);
+  vg_lvgl_sync_wifi_selection();
+}
+
 static void vg_lvgl_button_event(lv_event_t *event)
 {
   uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
+  vg_page_t page = vg_ui_page();
 
   if (index < 5)
     {
       g_feedback_ticks = 3;
-      if (vg_ui_page() == VG_PAGE_HOME && index == 0)
+      if (vg_ui_wizard_active())
+        {
+          vg_input_dispatch(g_button_actions[index]);
+          return;
+        }
+
+      if (page == VG_PAGE_HOME && index == 0)
         {
           vg_ui_set_page(VG_PAGE_EVENT);
         }
-      else if (vg_ui_page() == VG_PAGE_HOME && index == 1)
+      else if (page == VG_PAGE_HOME && index == 1)
         {
           vg_ui_set_page(VG_PAGE_HISTORY);
         }
-      else if (vg_ui_page() == VG_PAGE_HOME && index == 2)
+      else if (page == VG_PAGE_HOME && index == 2)
         {
           vg_ui_set_page(VG_PAGE_TEST);
         }
-      else if (vg_ui_page() == VG_PAGE_TEST_MORE && index == 1)
+      else if (page == VG_PAGE_TEST && index == 3)
+        {
+          vg_ui_set_page(VG_PAGE_TEST_MORE);
+        }
+      else if (page == VG_PAGE_TEST_MORE && index == 0)
+        {
+          vg_ui_set_page(VG_PAGE_NETWORK);
+        }
+      else if (page == VG_PAGE_TEST_MORE && index == 1)
+        {
+          vg_input_dispatch(VG_ACT_TEST_NETWORK);
+        }
+      else if (page == VG_PAGE_TEST_MORE && index == 2)
+        {
+          vg_ui_set_page(VG_PAGE_BINDING);
+        }
+      else if (page == VG_PAGE_TEST_MORE && index == 3)
         {
           vg_ui_set_page(VG_PAGE_TEST);
         }
-      else if (vg_ui_page() == VG_PAGE_HISTORY && index == 3)
+      else if (page == VG_PAGE_HISTORY && index == 3)
         {
           vg_ui_set_page(VG_PAGE_TEST);
         }
-      else if (vg_ui_page() == VG_PAGE_TEST_MORE && index == 4)
+      else if (page == VG_PAGE_TEST_MORE && index == 4)
+        {
+          vg_ui_set_page(VG_PAGE_HOME);
+        }
+      else if (page == VG_PAGE_NETWORK && index == 0)
+        {
+          vg_lvgl_wifi_hide_keyboard();
+          g_wifi_ssid_dirty = false;
+          vg_wifi_start_scan();
+        }
+      else if (page == VG_PAGE_NETWORK && index == 1)
+        {
+          vg_lvgl_wifi_hide_keyboard();
+          g_wifi_ssid_dirty = false;
+          vg_wifi_select(1);
+        }
+      else if (page == VG_PAGE_NETWORK && index == 2)
+        {
+          vg_lvgl_wifi_hide_keyboard();
+          vg_wifi_connect(lv_textarea_get_text(g_wifi_ssid),
+                          lv_textarea_get_text(g_wifi_password), true);
+          lv_textarea_set_text(g_wifi_password, "");
+        }
+      else if (page == VG_PAGE_NETWORK && index == 3)
+        {
+          vg_lvgl_wifi_hide_keyboard();
+          lv_textarea_set_text(g_wifi_password, "");
+          vg_ui_set_page(VG_PAGE_BINDING);
+        }
+      else if (page == VG_PAGE_NETWORK && index == 4)
+        {
+          vg_lvgl_wifi_hide_keyboard();
+          lv_textarea_set_text(g_wifi_password, "");
+          vg_ui_set_page(VG_PAGE_TEST_MORE);
+        }
+      else if (page == VG_PAGE_BINDING && index == 0)
+        {
+          vg_ui_set_page(VG_PAGE_NETWORK);
+        }
+      else if (page == VG_PAGE_BINDING && index == 1)
+        {
+          vg_ui_set_page(VG_PAGE_TEST);
+        }
+      else if (page == VG_PAGE_BINDING && index == 3)
+        {
+          vg_ui_set_page(VG_PAGE_TEST_MORE);
+        }
+      else if (page == VG_PAGE_BINDING && index == 4)
         {
           vg_ui_set_page(VG_PAGE_HOME);
         }
@@ -175,15 +362,31 @@ static void vg_lvgl_refresh_buttons(void)
         vg_lvgl_set_button(0, "麦克风", VG_ACT_TEST_MIC);
         vg_lvgl_set_button(1, "播放", VG_ACT_TEST_SPEAKER);
         vg_lvgl_set_button(2, "录入", VG_ACT_ENTER);
-        vg_lvgl_set_button(3, "网络", VG_ACT_TEST_NETWORK);
+        vg_lvgl_set_button(3, "更多", VG_ACT_NONE);
         vg_lvgl_set_button(4, "返回", VG_ACT_BACK);
         break;
 
       case VG_PAGE_TEST_MORE:
-        vg_lvgl_set_button(0, "网络", VG_ACT_TEST_NETWORK);
-        vg_lvgl_set_button(1, "测试页", VG_ACT_BACK);
+        vg_lvgl_set_button(0, "配网", VG_ACT_NONE);
+        vg_lvgl_set_button(1, "网络测", VG_ACT_TEST_NETWORK);
+        vg_lvgl_set_button(2, "绑定", VG_ACT_NONE);
+        vg_lvgl_set_button(3, "测试", VG_ACT_NONE);
+        vg_lvgl_set_button(4, "首页", VG_ACT_BACK);
+        break;
+
+      case VG_PAGE_NETWORK:
+        vg_lvgl_set_button(0, "扫描", VG_ACT_WIFI_SCAN);
+        vg_lvgl_set_button(1, "热点", VG_ACT_WIFI_SELECT);
+        vg_lvgl_set_button(2, "连接", VG_ACT_NONE);
+        vg_lvgl_set_button(3, "绑定", VG_ACT_BINDING);
+        vg_lvgl_set_button(4, "返回", VG_ACT_BACK);
+        break;
+
+      case VG_PAGE_BINDING:
+        vg_lvgl_set_button(0, "配网", VG_ACT_NONE);
+        vg_lvgl_set_button(1, "测试", VG_ACT_NONE);
         vg_lvgl_set_button(2, "", VG_ACT_NONE);
-        vg_lvgl_set_button(3, "", VG_ACT_NONE);
+        vg_lvgl_set_button(3, "返回", VG_ACT_BACK);
         vg_lvgl_set_button(4, "首页", VG_ACT_BACK);
         break;
 
@@ -201,7 +404,8 @@ static void vg_lvgl_refresh_buttons(void)
       lv_obj_add_flag(g_buttons[3], LV_OBJ_FLAG_HIDDEN);
       lv_obj_add_flag(g_buttons[4], LV_OBJ_FLAG_HIDDEN);
     }
-  else if (vg_ui_page() != VG_PAGE_TEST && vg_ui_page() != VG_PAGE_TEST_MORE)
+  else if (vg_ui_page() != VG_PAGE_TEST && vg_ui_page() != VG_PAGE_TEST_MORE &&
+           vg_ui_page() != VG_PAGE_NETWORK && vg_ui_page() != VG_PAGE_BINDING)
     {
       lv_obj_add_flag(g_buttons[4], LV_OBJ_FLAG_HIDDEN);
     }
@@ -241,6 +445,7 @@ static void vg_lvgl_refresh(lv_timer_t *timer)
 
   lv_obj_set_style_bg_color(g_bar, lv_color_hex(vg_level_color()), 0);
   vg_lvgl_refresh_buttons();
+  vg_lvgl_refresh_wifi_controls();
 }
 
 static void *vg_lvgl_thread(void *arg)
@@ -271,6 +476,7 @@ static void *vg_lvgl_thread(void *arg)
     {
       printf("[velaguard] LVGL 显示初始化失败，UI 降级为控制台输出\n");
       g_running = false;
+      vg_lvgl_thread_exited();
       return NULL;
     }
 
@@ -300,6 +506,44 @@ static void *vg_lvgl_thread(void *arg)
   lv_obj_set_style_text_font(g_clock, &lv_font_simsun_16_cjk, 0);
   lv_obj_set_style_text_color(g_clock, lv_color_hex(0x9fb6c9), 0);
   lv_label_set_text(g_clock, "时间未同步");
+
+  g_wifi_ssid = lv_textarea_create(lv_screen_active());
+  lv_obj_set_size(g_wifi_ssid, 230, 24);
+  lv_obj_set_pos(g_wifi_ssid, 5, 82);
+  lv_textarea_set_one_line(g_wifi_ssid, true);
+  lv_textarea_set_max_length(g_wifi_ssid, VG_WIFI_SSID_LEN - 1);
+  lv_textarea_set_placeholder_text(g_wifi_ssid, "Wi-Fi 名称");
+  lv_obj_set_style_text_font(g_wifi_ssid, &lv_font_simsun_16_cjk, 0);
+  lv_obj_add_event_cb(g_wifi_ssid, vg_lvgl_wifi_textarea_event,
+                      LV_EVENT_FOCUSED, NULL);
+  lv_obj_add_event_cb(g_wifi_ssid, vg_lvgl_wifi_textarea_event,
+                      LV_EVENT_VALUE_CHANGED, NULL);
+
+  g_wifi_password = lv_textarea_create(lv_screen_active());
+  lv_obj_set_size(g_wifi_password, 230, 24);
+  lv_obj_set_pos(g_wifi_password, 5, 109);
+  lv_textarea_set_one_line(g_wifi_password, true);
+  lv_textarea_set_max_length(g_wifi_password, VG_WIFI_PASSWORD_LEN - 1);
+  lv_textarea_set_password_mode(g_wifi_password, true);
+  lv_textarea_set_placeholder_text(g_wifi_password,
+                                   "Wi-Fi 密码（开放网络留空）");
+  lv_obj_set_style_text_font(g_wifi_password, &lv_font_simsun_16_cjk, 0);
+  lv_obj_add_event_cb(g_wifi_password, vg_lvgl_wifi_textarea_event,
+                      LV_EVENT_FOCUSED, NULL);
+
+  g_wifi_keyboard = lv_keyboard_create(lv_screen_active());
+  lv_obj_set_size(g_wifi_keyboard, 240, 96);
+  lv_obj_set_pos(g_wifi_keyboard, 0, 96);
+  lv_keyboard_set_mode(g_wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+  lv_obj_add_event_cb(g_wifi_keyboard, vg_lvgl_wifi_keyboard_event,
+                      LV_EVENT_READY, NULL);
+  lv_obj_add_event_cb(g_wifi_keyboard, vg_lvgl_wifi_keyboard_event,
+                      LV_EVENT_CANCEL, NULL);
+  lv_obj_add_flag(g_wifi_ssid, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(g_wifi_password, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(g_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+  memset(g_wifi_synced_ssid, 0, sizeof(g_wifi_synced_ssid));
+  g_wifi_ssid_dirty = false;
 
   for (unsigned int i = 0; i < 5; i++)
     {
@@ -336,6 +580,7 @@ static void *vg_lvgl_thread(void *arg)
     }
 
   lv_nuttx_deinit(&g_result);
+  vg_lvgl_thread_exited();
   return NULL;
 }
 
@@ -359,17 +604,41 @@ int vg_ui_lvgl_start(void)
   pthread_attr_t attr;
   int ret;
 
+  pthread_mutex_lock(&g_lifecycle_lock);
+  if (g_thread_started && !g_thread_exited)
+    {
+      pthread_mutex_unlock(&g_lifecycle_lock);
+      return -EBUSY;
+    }
+
+  if (g_thread_started)
+    {
+#ifndef __NuttX__
+      (void)pthread_join(g_thread, NULL);
+#endif
+      g_thread_started = false;
+    }
+
   if (g_running)
     {
+      pthread_mutex_unlock(&g_lifecycle_lock);
       return 0;
     }
 
   g_running = true;
+  g_thread_started = true;
+  g_thread_exited = false;
+  pthread_mutex_unlock(&g_lifecycle_lock);
   ret = pthread_attr_init(&attr);
   if (ret != 0)
     {
       printf("[velaguard] LVGL线程属性初始化失败: %d\n", ret);
       g_running = false;
+      pthread_mutex_lock(&g_lifecycle_lock);
+      g_thread_started = false;
+      g_thread_exited = true;
+      pthread_cond_broadcast(&g_lifecycle_cond);
+      pthread_mutex_unlock(&g_lifecycle_lock);
       return -1;
     }
 
@@ -379,6 +648,11 @@ int vg_ui_lvgl_start(void)
       printf("[velaguard] LVGL线程栈设置失败: %d\n", ret);
       pthread_attr_destroy(&attr);
       g_running = false;
+      pthread_mutex_lock(&g_lifecycle_lock);
+      g_thread_started = false;
+      g_thread_exited = true;
+      pthread_cond_broadcast(&g_lifecycle_cond);
+      pthread_mutex_unlock(&g_lifecycle_lock);
       return -1;
     }
 
@@ -394,6 +668,11 @@ int vg_ui_lvgl_start(void)
       printf("[velaguard] LVGL线程创建失败: %d (%s)\n",
              ret, strerror(ret));
       g_running = false;
+      pthread_mutex_lock(&g_lifecycle_lock);
+      g_thread_started = false;
+      g_thread_exited = true;
+      pthread_cond_broadcast(&g_lifecycle_cond);
+      pthread_mutex_unlock(&g_lifecycle_lock);
       pthread_attr_destroy(&attr);
       return -1;
     }
@@ -405,18 +684,24 @@ int vg_ui_lvgl_start(void)
 
 void vg_ui_lvgl_stop(void)
 {
-  if (!g_running)
+  pthread_mutex_lock(&g_lifecycle_lock);
+  if (!g_thread_started)
     {
+      g_running = false;
+      pthread_mutex_unlock(&g_lifecycle_lock);
       return;
     }
 
   g_running = false;
-#ifdef __NuttX__
-  /* NuttX task has no pthread_join; let its loop observe the stop flag. */
-  usleep(200000);
-#else
-  pthread_join(g_thread, NULL);
+  while (!g_thread_exited)
+    {
+      pthread_cond_wait(&g_lifecycle_cond, &g_lifecycle_lock);
+    }
+#ifndef __NuttX__
+  (void)pthread_join(g_thread, NULL);
 #endif
+  g_thread_started = false;
+  pthread_mutex_unlock(&g_lifecycle_lock);
 }
 
 bool vg_ui_lvgl_running(void)

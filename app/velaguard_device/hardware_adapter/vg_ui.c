@@ -2,6 +2,7 @@
  * 安聆 VelaGuard - 本地 UI 实现 (PRD-04)
  ****************************************************************************/
 
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -21,6 +22,7 @@
 #include "velaguard/vg_time.h"
 #include "velaguard/vg_ui.h"
 #include "velaguard/vg_uploader.h"
+#include "velaguard/vg_wifi.h"
 
 /****************************************************************************
  * Private Data
@@ -33,8 +35,9 @@ static int               g_wiz_kind;
 static int               g_wiz_phrase;
 static int               g_wiz_person;
 static int               g_wiz_style;
-static bool              g_wiz_restart_daemon;
+static volatile bool     g_wiz_restart_daemon;
 static volatile bool     g_wiz_capture_running;
+static volatile bool     g_wiz_prepare_running;
 static volatile bool     g_wiz_cancel_requested;
 static volatile bool     g_wiz_audio_ready = true;
 static volatile bool     g_wiz_restore_running;
@@ -268,8 +271,8 @@ static int vg_render_test(char *buf, size_t len, bool ascii)
   VG_APPEND("%s: %s\n", ascii ? "Play" : "播放",
             vg_indicator_has_audio_out() ? (ascii ? "READY" : "已发现")
                                          : (ascii ? "MISSING" : "未发现"));
-  VG_APPEND("%s\n", ascii ? "KEY2 Play  KEY3 Enroll"
-                            : "2播放  3录入  4网络  5返回");
+  VG_APPEND("%s\n", ascii ? "KEY2 Play  KEY3 Enroll  KEY4 More"
+                            : "2播放  3录入  4更多  5返回");
   if (vg_ui_wizard_active())
     {
       vg_tpl_kind_t kind = (vg_tpl_kind_t)g_wiz_kind;
@@ -329,14 +332,75 @@ static int vg_render_test_more(char *buf, size_t len, bool ascii)
   VG_APPEND("%s: %s\n", ascii ? "Network" : "网络",
             vg_uploader_online() ? (ascii ? "ONLINE" : "已连接")
                                  : (ascii ? "OFFLINE" : "未连接"));
-  VG_APPEND("%s\n", ascii ? "WiFi setup: use wapi or config file"
-                            : "Wi-Fi配网：使用wapi或配置文件");
+  VG_APPEND("%s\n", ascii ? "WiFi setup: open the setup page"
+                            : "Wi-Fi配网：进入配网页面输入名称和密码");
   VG_APPEND("%s: %s:%d\n", ascii ? "Console" : "控制台",
             vg_config()->console_host, vg_config()->console_port);
-  VG_APPEND("%s\n", ascii ? "button 1: network test; button 2: test page"
-                            : "按钮1：网络测试；按钮2：返回测试页");
-  VG_APPEND("%s\n", ascii ? "button 5: home"
-                            : "按钮5：返回主界面");
+  VG_APPEND("%s\n", ascii ? "button 1 setup; 2 network test; 3 phone bind"
+                            : "按钮1配网；按钮2网络自检；按钮3手机绑定");
+  VG_APPEND("%s\n", ascii ? "button 4 test page; 5 home"
+                            : "按钮4测试页；按钮5主界面");
+  return (int)pos;
+}
+
+static int vg_render_network(char *buf, size_t len, bool ascii)
+{
+  vg_wifi_status_t status;
+  size_t pos = 0;
+
+  vg_wifi_get_status(&status);
+  VG_APPEND("%s\n", ascii ? "== Wi-Fi SETUP ==" : "== Wi-Fi 配网 ==");
+  VG_APPEND("%s: %s\n", ascii ? "State" : "状态",
+            vg_wifi_state_text(status.state, ascii));
+  VG_APPEND("%s: %s\n", ascii ? "SSID" : "当前 Wi-Fi",
+            status.ssid[0] != '\0' ? status.ssid : "-");
+  VG_APPEND("%s: %s\n", ascii ? "IP" : "IP 地址",
+            status.ip_ready ? status.ip : (ascii ? "NOT READY" : "未获取"));
+  VG_APPEND("%s: %u\n", ascii ? "Networks" : "可选热点",
+            status.network_count);
+
+  if (status.error[0] != '\0')
+    {
+      VG_APPEND("%s: %s\n", ascii ? "Error" : "提示", status.error);
+    }
+
+  VG_APPEND("%s\n", ascii ? "Use buttons: scan, select, connect, bind, back"
+                            : "按钮：扫描、选热点、连接、绑定、返回");
+  return (int)pos;
+}
+
+static int vg_render_binding(char *buf, size_t len, bool ascii)
+{
+  const vg_config_t *cfg = vg_config();
+  size_t pos = 0;
+  const char *scheme = cfg->console_tls ? "https" : "http";
+
+  VG_APPEND("%s\n", ascii ? "== PHONE BINDING =="
+                            : "== 小米手机演示绑定 ==");
+  VG_APPEND("%s: %s\n", ascii ? "Device" : "设备编号", cfg->device_id);
+  VG_APPEND("%s: %s://%s:%d/\n", ascii ? "Console" : "控制台",
+            scheme, cfg->console_host, cfg->console_port);
+  if (cfg->demo_mode)
+    {
+      VG_APPEND("%s\n", ascii ? "Demo pairing key: see console terminal"
+                                : "演示配对密钥：请查看控制台启动终端（每次启动随机生成）");
+    }
+  else
+    {
+      VG_APPEND("%s\n", ascii ? "Use the pairing key configured on console"
+                                : "请使用控制台配置的配对密钥");
+    }
+
+  VG_APPEND("%s\n", ascii ? "1 Join the same Wi-Fi"
+                            : "1 手机、开发板和电脑连接同一 Wi-Fi");
+  VG_APPEND("%s\n", ascii ? "2 Open the console URL in Xiaomi browser"
+                            : "2 小米浏览器打开上面的控制台地址");
+  VG_APPEND("%s\n", ascii ? "3 Enter device ID and key, then pair"
+                            : "3 输入设备编号和密钥，点击配对");
+  VG_APPEND("%s\n", ascii ? "Serial: velaguard console set <PC-IP>"
+                            : "串口可输入：velaguard console set <电脑IP>");
+  VG_APPEND("%s\n", ascii ? "1 Wi-Fi  2 Test  4 Back  5 Home"
+                            : "1网络设置  2测试页  4返回  5首页");
   return (int)pos;
 }
 
@@ -378,7 +442,29 @@ vg_page_t vg_ui_page(void)
 
 void vg_ui_next_page(void)
 {
-  g_page = (vg_page_t)((g_page + 1) % VG_PAGE_MAX);
+  switch (g_page)
+    {
+      case VG_PAGE_HOME:
+        g_page = VG_PAGE_EVENT;
+        break;
+
+      case VG_PAGE_EVENT:
+        g_page = VG_PAGE_HISTORY;
+        break;
+
+      case VG_PAGE_HISTORY:
+        g_page = VG_PAGE_TEST;
+        break;
+
+      case VG_PAGE_TEST:
+        g_page = VG_PAGE_TEST_MORE;
+        break;
+
+      default:
+        g_page = VG_PAGE_HOME;
+        break;
+    }
+
   if (g_page == VG_PAGE_HISTORY)
     {
       g_history_top = 0;
@@ -427,6 +513,12 @@ int vg_ui_render(char *buf, size_t len, bool ascii)
       case VG_PAGE_TEST_MORE:
         return vg_render_test_more(buf, len, ascii);
 
+      case VG_PAGE_NETWORK:
+        return vg_render_network(buf, len, ascii);
+
+      case VG_PAGE_BINDING:
+        return vg_render_binding(buf, len, ascii);
+
       default:
         return vg_render_home(buf, len, ascii);
     }
@@ -453,12 +545,33 @@ void vg_ui_history_scroll(int delta)
  ****************************************************************************/
 
 static void vg_wizard_audio_restore(void);
+static void vg_wizard_audio_restore_async(void);
 
 static void *vg_wizard_prepare_worker(void *arg)
 {
+  int ret;
+
   (void)arg;
-  vg_daemon_stop();
-  g_wiz_audio_ready = true;
+  ret = vg_daemon_stop();
+  g_wiz_prepare_running = false;
+
+  /* 取消可能发生在守护停止等待期间。由准备线程统一完成恢复，避免
+   * 取消线程先启动守护、准备线程随后又把它停掉。 */
+  if (g_wiz_cancel_requested)
+    {
+      vg_enroll_cancel();
+      g_wizard = VG_WIZ_IDLE;
+      g_wiz_cancel_requested = false;
+      vg_wizard_audio_restore_async();
+      vg_indicator_set_led(VG_LED_GUARD);
+      return NULL;
+    }
+
+  g_wiz_audio_ready = ret == 0;
+  if (ret < 0)
+    {
+      printf("[velaguard] 录入前守护停止失败，请先确认音频通路空闲\n");
+    }
   return NULL;
 }
 
@@ -477,6 +590,7 @@ static void vg_wizard_audio_restore_async(void)
   if (!g_wiz_restart_daemon)
     {
       vg_capture_resume();
+      g_wiz_audio_ready = true;
       return;
     }
 
@@ -485,6 +599,7 @@ static void vg_wizard_audio_restore_async(void)
       return;
     }
 
+  g_wiz_audio_ready = false;
   g_wiz_restore_running = true;
   if (pthread_create(&thread, NULL, vg_wizard_restore_worker, NULL) != 0)
     {
@@ -502,10 +617,12 @@ static void *vg_wizard_capture_worker(void *arg)
   float feat[VG_FEATURE_DIM];
   int got = 0;
   int tries = 0;
+  bool capture_failed = false;
 
   (void)arg;
   if (vg_capture_open(VG_SRC_MIC, NULL) < 0)
     {
+      capture_failed = true;
       printf("[velaguard] 录入失败：无法打开麦克风\n");
       goto done;
     }
@@ -528,6 +645,7 @@ static void *vg_wizard_capture_worker(void *arg)
   if (!g_wiz_cancel_requested &&
       (got < VG_FRAME_LEN || vg_feature_extract(pcm, (size_t)got, feat) < 0))
     {
+      capture_failed = true;
       printf("[velaguard] 录入失败：麦克风采样不足，请重试\n");
       goto done;
     }
@@ -535,6 +653,7 @@ static void *vg_wizard_capture_worker(void *arg)
   if (!g_wiz_cancel_requested && g_wizard == VG_WIZ_RECORDING &&
       vg_enroll_feed(feat) < 0)
     {
+      capture_failed = true;
       printf("[velaguard] 录入失败：模板采样已达到上限\n");
     }
 
@@ -546,6 +665,11 @@ done:
       vg_wizard_audio_restore();
       vg_indicator_set_led(VG_LED_GUARD);
       g_wiz_cancel_requested = false;
+    }
+  else if (capture_failed)
+    {
+      /* 失败采样也要释放暂停状态，避免守护长期停在关闭状态。 */
+      vg_wizard_audio_restore_async();
     }
   return NULL;
 }
@@ -581,25 +705,58 @@ static int vg_wizard_capture_start(void)
 
 static void vg_wizard_audio_restore(void)
 {
+  int ret;
+  int retry;
+
   if (g_wiz_restart_daemon)
     {
-      (void)vg_daemon_start(VG_SRC_MIC, NULL);
+      ret = -1;
+      for (retry = 0; retry < 30; retry++)
+        {
+          ret = vg_daemon_start(VG_SRC_MIC, NULL);
+          if (ret != -EBUSY)
+            {
+              break;
+            }
+
+          /* 停止超时或另一个清理者短暂占用生命周期锁时，等任务真正
+           * 退出后再恢复，避免取消录入后永久停留在“音频切换中”。 */
+          usleep(100 * 1000);
+        }
+
+      if (ret < 0)
+        {
+          g_wiz_audio_ready = false;
+          printf("[velaguard] 守护恢复失败，请稍后重试\n");
+          return;
+        }
+
+      g_wiz_audio_ready = true;
       g_wiz_restart_daemon = false;
     }
   else
     {
       vg_capture_resume();
+      g_wiz_audio_ready = true;
     }
 }
 
 void vg_ui_wizard_start(void)
 {
+  if (g_wiz_prepare_running || g_wiz_restore_running ||
+      g_wiz_capture_running)
+    {
+      printf("[velaguard] 音频通路正在切换，请稍候再进入录入\n");
+      return;
+    }
+
   g_page = VG_PAGE_TEST;
   g_wizard = VG_WIZ_PICK_KIND;
   g_wiz_kind = VG_TPL_NAME;
   g_wiz_phrase = 0;
   g_wiz_person = 0;
   g_wiz_style = VG_TPL_CALM;
+  g_wiz_prepare_running = false;
   g_wiz_cancel_requested = false;
   g_wiz_restart_daemon = vg_daemon_running() &&
                          vg_capture_source() == VG_SRC_MIC;
@@ -609,13 +766,15 @@ void vg_ui_wizard_start(void)
     {
       pthread_t thread;
 
+      g_wiz_prepare_running = true;
       if (pthread_create(&thread, NULL, vg_wizard_prepare_worker, NULL) == 0)
         {
           pthread_detach(thread);
         }
       else
         {
-          g_wiz_audio_ready = true;
+          g_wiz_prepare_running = false;
+          g_wiz_audio_ready = false;
           printf("[velaguard] 音频通路切换线程启动失败\n");
         }
     }
@@ -765,6 +924,15 @@ void vg_ui_wizard_confirm(void)
 
 void vg_ui_wizard_cancel(void)
 {
+  if (g_wiz_prepare_running)
+    {
+      g_wiz_cancel_requested = true;
+      vg_enroll_cancel();
+      g_wizard = VG_WIZ_IDLE;
+      printf("[velaguard] 正在结束音频占用，取消后自动恢复守护\n");
+      return;
+    }
+
   if (g_wiz_capture_running)
     {
       g_wiz_cancel_requested = true;

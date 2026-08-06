@@ -3,6 +3,7 @@
  ****************************************************************************/
 
 #include <inttypes.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/types.h>
@@ -38,6 +39,7 @@
 #include "velaguard/vg_ui.h"
 #include "velaguard/vg_ui_lvgl.h"
 #include "velaguard/vg_uploader.h"
+#include "velaguard/vg_wifi.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -50,6 +52,10 @@
  ****************************************************************************/
 
 static volatile bool g_running;
+static volatile bool g_daemon_exited = true;
+static pthread_mutex_t g_daemon_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool          g_daemon_stopping;
+static bool          g_daemon_cleanup_in_progress;
 static bool          g_inited;
 
 /* FLAT 构建下静态变量跨任务保留，但文件描述符属于任务。
@@ -62,6 +68,21 @@ static pthread_t     g_thread;
 #endif
 static vg_level_t    g_last_level[VG_EVT_TYPE_MAX];
 static uint64_t      g_last_upload_tick;
+
+static void vg_daemon_release_modules(void)
+{
+  vg_ui_lvgl_stop();
+  vg_input_deinit();
+  vg_indicator_deinit();
+  vg_detector_deinit();
+  vg_capture_close();
+  vg_uploader_deinit();
+  vg_enroll_deinit();
+  vg_event_log_deinit();
+  vg_wifi_deinit();
+  vg_ui_deinit();
+  g_inited = false;
+}
 
 /****************************************************************************
  * Private Functions - 状态机回调
@@ -165,6 +186,9 @@ static void *vg_daemon_thread(void *arg)
       usleep(VG_TICK_MS * 1000);
     }
 
+  pthread_mutex_lock(&g_daemon_lifecycle_lock);
+  g_daemon_exited = true;
+  pthread_mutex_unlock(&g_daemon_lifecycle_lock);
   printf("[velaguard] 守护任务已停止\n");
   return NULL;
 }
@@ -254,6 +278,11 @@ int vg_daemon_init(void)
       goto err_ui;
     }
 
+  if (vg_wifi_init() < 0)
+    {
+      printf("[velaguard] Wi-Fi 上一次任务尚未完成，暂不重新初始化\n");
+    }
+
   memset(&cb, 0, sizeof(cb));
   cb.on_event_changed = vg_on_event_changed;
   cb.on_escalate = vg_on_escalate;
@@ -301,22 +330,20 @@ err_event_log:
 
 void vg_daemon_deinit(void)
 {
+  int ret;
+
   if (!g_inited)
     {
       return;
     }
 
-  vg_daemon_stop();
-  vg_ui_lvgl_stop();
-  vg_input_deinit();
-  vg_indicator_deinit();
-  vg_detector_deinit();
-  vg_capture_close();
-  vg_uploader_deinit();
-  vg_enroll_deinit();
-  vg_event_log_deinit();
-  vg_ui_deinit();
-  g_inited = false;
+  ret = vg_daemon_stop();
+  if (ret < 0)
+    {
+      printf("[velaguard] 守护任务尚未退出，暂不释放运行资源\n");
+      return;
+    }
+  vg_daemon_release_modules();
 }
 
 void vg_daemon_step(void)
@@ -355,13 +382,52 @@ void vg_daemon_step(void)
 
 int vg_daemon_start(vg_source_t src, const char *path)
 {
+  int create_ret = 0;
+  int init_ret;
+  bool create_failed = false;
+
+  pthread_mutex_lock(&g_daemon_lifecycle_lock);
+  if (g_daemon_cleanup_in_progress)
+    {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      printf("[velaguard] 守护任务正在清理，请稍后重试\n");
+      return -EBUSY;
+    }
+
   if (g_running)
     {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
       printf("[velaguard] 守护任务已在运行\n");
       return 0;
     }
 
-  vg_daemon_init();
+  /* 上一次 NuttX 停止等待超时后，任务可能已经在返回；先回收它留下的
+   * 音频句柄，再允许新的守护任务启动。回收期间其他启动/停止请求会被
+   * g_daemon_cleanup_in_progress 拒绝，避免重复 close。 */
+  if (g_daemon_stopping && g_daemon_exited)
+    {
+      g_daemon_cleanup_in_progress = true;
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      vg_capture_close();
+      pthread_mutex_lock(&g_daemon_lifecycle_lock);
+      g_daemon_stopping = false;
+      g_daemon_cleanup_in_progress = false;
+    }
+
+  if (!g_daemon_exited || g_daemon_stopping)
+    {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      printf("[velaguard] 上一次守护任务尚未退出，请稍后重试\n");
+      return -EBUSY;
+    }
+
+  init_ret = vg_daemon_init();
+  if (init_ret < 0)
+    {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      printf("[velaguard] 守护模块初始化失败\n");
+      return init_ret;
+    }
 
   if (src != VG_SRC_NONE && vg_capture_open(src, path) < 0)
     {
@@ -373,6 +439,8 @@ int vg_daemon_start(vg_source_t src, const char *path)
   vg_indicator_set_led(VG_LED_GUARD);
   vg_ui_lvgl_start();
 
+  g_daemon_exited = false;
+  g_daemon_stopping = false;
   g_running = true;
 
 #ifdef __NuttX__
@@ -380,40 +448,88 @@ int vg_daemon_start(vg_source_t src, const char *path)
    * 因此守护必须作为独立任务存在。
    */
 
-  if (task_create("velaguard_d", CONFIG_VELAGUARD_PRIORITY,
-                  CONFIG_VELAGUARD_STACKSIZE, vg_daemon_task, NULL) < 0)
+  create_ret = task_create("velaguard_d", CONFIG_VELAGUARD_PRIORITY,
+                           CONFIG_VELAGUARD_STACKSIZE, vg_daemon_task, NULL);
+  if (create_ret < 0)
     {
       g_running = false;
-      vg_daemon_deinit();
-      printf("[velaguard] 守护任务创建失败\n");
-      return -1;
+      g_daemon_exited = true;
+      create_failed = true;
     }
 #else
-  if (pthread_create(&g_thread, NULL, vg_daemon_thread, NULL) != 0)
+  create_ret = pthread_create(&g_thread, NULL, vg_daemon_thread, NULL);
+  if (create_ret != 0)
     {
       g_running = false;
-      vg_daemon_deinit();
-      printf("[velaguard] 守护任务创建失败\n");
-      return -1;
+      g_daemon_exited = true;
+      create_failed = true;
     }
 #endif
 
+  if (create_failed)
+    {
+      g_daemon_stopping = true;
+      g_daemon_cleanup_in_progress = true;
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      vg_daemon_release_modules();
+      pthread_mutex_lock(&g_daemon_lifecycle_lock);
+      g_daemon_stopping = false;
+      g_daemon_cleanup_in_progress = false;
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      printf("[velaguard] 守护任务创建失败\n");
+      return -1;
+    }
+
+  pthread_mutex_unlock(&g_daemon_lifecycle_lock);
   return 0;
 }
 
 int vg_daemon_stop(void)
 {
-  if (!g_running)
+  pthread_mutex_lock(&g_daemon_lifecycle_lock);
+  if (g_daemon_cleanup_in_progress)
     {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      return -EBUSY;
+    }
+  if (g_daemon_stopping && !g_daemon_exited)
+    {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+      return -EBUSY;
+    }
+  if (!g_running && g_daemon_exited && !g_daemon_stopping)
+    {
+      pthread_mutex_unlock(&g_daemon_lifecycle_lock);
       return 0;
     }
 
   g_running = false;
+  g_daemon_stopping = true;
+  g_daemon_cleanup_in_progress = true;
+  pthread_mutex_unlock(&g_daemon_lifecycle_lock);
 
 #ifdef __NuttX__
-  /* NuttX task_create 无法 join，等待守护循环自行退出 */
+  /* NuttX task_create 无法 join，必须等任务自己离开主循环后再释放
+   * 音频句柄和其他模块资源。
+   */
+  {
+    unsigned int waited_ms = 0;
 
-  usleep(VG_TICK_MS * 2000);
+    while (!g_daemon_exited && waited_ms < 3000)
+      {
+        usleep(10 * 1000);
+        waited_ms += 10;
+      }
+
+    if (!g_daemon_exited)
+      {
+        pthread_mutex_lock(&g_daemon_lifecycle_lock);
+        g_daemon_cleanup_in_progress = false;
+        pthread_mutex_unlock(&g_daemon_lifecycle_lock);
+        printf("[velaguard] 守护任务关闭等待超时\n");
+        return -ETIMEDOUT;
+      }
+  }
 #else
   /* POSIX 路径：join 等待线程真正结束，避免 deinit 时 fd 被仍在运行的线程使用 */
 
@@ -422,6 +538,11 @@ int vg_daemon_stop(void)
 
   /* 守护退出后释放音频句柄，录入或自检才能重新占用麦克风。 */
   vg_capture_close();
+
+  pthread_mutex_lock(&g_daemon_lifecycle_lock);
+  g_daemon_stopping = false;
+  g_daemon_cleanup_in_progress = false;
+  pthread_mutex_unlock(&g_daemon_lifecycle_lock);
 
   return 0;
 }

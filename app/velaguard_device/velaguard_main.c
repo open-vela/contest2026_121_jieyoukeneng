@@ -6,6 +6,7 @@
  ****************************************************************************/
 
 #include <inttypes.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,9 @@
 #include "velaguard/vg_time.h"
 #include "velaguard/vg_ui.h"
 #include "velaguard/vg_uploader.h"
+#include "velaguard/vg_wifi.h"
+
+#define VG_GETPASS_BUFFER_LEN 128
 
 /****************************************************************************
  * Private Functions
@@ -47,6 +51,7 @@ static void vg_usage(void)
     "  stop                         停止守护\n"
     "  status                       运行状态、性能与硬件可用性\n"
     "  config                       打印当前配置（不回显任何凭证）\n"
+    "  console [show|set <主机> [端口] [--no-save]] 配置演示控制台地址\n"
     "\n"
     "事件与确认\n"
     "  sim <type> [选项]            注入模拟观测，走完全相同的状态机\n"
@@ -54,8 +59,9 @@ static void vg_usage(void)
     "       --conf <0~1>  --phrase <短语>  --person <标签>\n"
     "       --urgency <0~1>  --repeat <n>  --times <n>  --interval <ms>\n"
     "  ack [<eventId>] <handled|false_alarm|snooze>\n"
-    "  key <page|handled|false|snooze|enter|back|up|down>\n"
-    "  ui [home|event|history|test|more] 打印当前页面（LCD 同款内容）\n"
+    "  key <page|handled|false|snooze|enter|back|up|down|wifi_scan|"
+         "wifi_select|binding>\n"
+    "  ui [home|event|history|test|more|network|binding] 打印当前页面（LCD 同款内容）\n"
     "  log [n]                      打印最近 n 条事件（默认 10）\n"
     "  logjson [n]                  以 JSON 数组输出（联调用）\n"
     "\n"
@@ -68,6 +74,7 @@ static void vg_usage(void)
     "  time <sync|unsync>           标记时间是否可信（夜间规则降级演示）\n"
     "  duplex <on|off>              标定录放并发能力\n"
     "  test <mic|speaker|network|all> 板端硬件与网络自检\n"
+    "  wifi <status|scan|next|connect> [SSID] [--no-save]\n"
     "  notify test                  生成一条测试通知并上传\n"
     "  notify --json '<事件JSON>'    Skill 文案回灌（见 agent_skill/）\n"
     "  flush                        立即重试所有待发送通知\n"
@@ -88,6 +95,137 @@ static float vg_argf(int argc, char **argv, const char *key, float def)
     }
 
   return def;
+}
+
+static bool vg_console_host_valid(const char *host)
+{
+  size_t i;
+  size_t n;
+
+  if (host == NULL)
+    {
+      return false;
+    }
+
+  n = strnlen(host, VG_URL_LEN);
+  if (n == 0 || n >= VG_URL_LEN)
+    {
+      return false;
+    }
+
+  for (i = 0; i < n; i++)
+    {
+      unsigned char c = (unsigned char)host[i];
+      if (c <= 0x20 || c == '/' || c == '\\' || c == '"' ||
+          c == '\'' || c == '?' || c == '#')
+        {
+          return false;
+        }
+    }
+
+  return true;
+}
+
+static int vg_cmd_console(int argc, char **argv)
+{
+  vg_config_t *cfg = vg_config();
+  vg_config_t old;
+  char path[VG_PATH_LEN + 32];
+  const char *host;
+  int port;
+  bool save = true;
+  bool port_set = false;
+  int i;
+  char *end;
+  long parsed;
+
+  if (argc < 3 || strcmp(argv[2], "show") == 0)
+    {
+      printf("控制台地址: %s://%s:%d%s\n",
+             cfg->console_tls ? "https" : "http", cfg->console_host,
+             cfg->console_port, cfg->console_path);
+      printf("提示: 小米手机与开发板、电脑连接同一 Wi-Fi，手机打开上面的地址\n");
+      return 0;
+    }
+
+  if (strcmp(argv[2], "set") != 0 || argc < 4 || argc > 6)
+    {
+      printf("用法: velaguard console show|set <电脑IP或主机名> [端口] [--no-save]\n");
+      return 1;
+    }
+
+  if (!cfg->demo_mode)
+    {
+      printf("生产配置受签名保护，请修改签名配置文件后重启\n");
+      return 1;
+    }
+
+  if (vg_daemon_running())
+    {
+      printf("请先执行 velaguard stop，再修改控制台地址\n");
+      return 1;
+    }
+
+  host = argv[3];
+  port = cfg->console_port;
+  for (i = 4; i < argc; i++)
+    {
+      if (strcmp(argv[i], "--no-save") == 0)
+        {
+          save = false;
+          continue;
+        }
+
+      if (port_set)
+        {
+          printf("端口只能指定一次\n");
+          return 1;
+        }
+      errno = 0;
+      end = NULL;
+      parsed = strtol(argv[i], &end, 10);
+      if (errno != 0 || end == argv[i] || *end != '\0' ||
+          parsed < 1 || parsed > 65535)
+        {
+          printf("端口必须是 1 到 65535 的整数\n");
+          return 1;
+        }
+      port = (int)parsed;
+      port_set = true;
+    }
+
+  if (!vg_console_host_valid(host))
+    {
+      printf("控制台主机名或 IP 地址不合法\n");
+      return 1;
+    }
+
+  old = *cfg;
+  snprintf(cfg->console_host, sizeof(cfg->console_host), "%s", host);
+  cfg->console_port = port;
+  if (strcmp(old.console_server_name, old.console_host) == 0 ||
+      old.console_server_name[0] == '\0')
+    {
+      snprintf(cfg->console_server_name, sizeof(cfg->console_server_name),
+               "%s", host);
+    }
+
+  if (save)
+    {
+      snprintf(path, sizeof(path), "%s/config.json", cfg->data_dir);
+      if (vg_config_save(path) < 0)
+        {
+          *cfg = old;
+          printf("控制台地址已恢复，配置文件保存失败: %s\n", path);
+          return 1;
+        }
+    }
+
+  printf("控制台地址已设置为 %s://%s:%d%s%s\n",
+         cfg->console_tls ? "https" : "http", cfg->console_host,
+         cfg->console_port, cfg->console_path,
+         save ? "（已保存）" : "（仅本次运行）");
+  return 0;
 }
 
 static int vg_argi(int argc, char **argv, const char *key, int def)
@@ -544,6 +682,87 @@ int main(int argc, char *argv[])
       return vg_cmd_test(argc, argv);
     }
 
+  if (strcmp(cmd, "wifi") == 0)
+    {
+      int ret;
+
+      if (argc < 3 || strcmp(argv[2], "status") == 0)
+        {
+          vg_ui_set_page(VG_PAGE_NETWORK);
+          vg_print_page();
+          return 0;
+        }
+      else if (strcmp(argv[2], "scan") == 0)
+        {
+          ret = vg_wifi_start_scan();
+        }
+      else if (strcmp(argv[2], "next") == 0)
+        {
+          ret = vg_wifi_select(1);
+        }
+      else if (strcmp(argv[2], "connect") == 0 &&
+               (argc == 4 || (argc == 5 && strcmp(argv[4], "--no-save") == 0)))
+        {
+          char password[VG_WIFI_PASSWORD_LEN];
+          const char *hidden;
+          size_t hidden_len = 0;
+          bool save = true;
+
+          if (argc == 5 && strcmp(argv[4], "--no-save") == 0)
+            {
+              save = false;
+            }
+
+          hidden = getpass("Wi-Fi 密码（回车表示开放网络）: ");
+          if (hidden == NULL)
+            {
+              ret = -EIO;
+            }
+          else
+            {
+              hidden_len = strnlen(hidden, VG_GETPASS_BUFFER_LEN);
+              if (hidden_len >= sizeof(password))
+                {
+                  ret = -EINVAL;
+                }
+              else
+                {
+                  snprintf(password, sizeof(password), "%s", hidden);
+                  ret = vg_wifi_connect(argv[3], password, save);
+                }
+
+              /* getpass() 返回的是任务级 128 字节静态缓冲，整个缓冲
+               * 都要清理，避免上一次较长密码的尾部残留。
+               */
+              memset((void *)hidden, 0, VG_GETPASS_BUFFER_LEN);
+            }
+          memset(password, 0, sizeof(password));
+        }
+      else
+        {
+          printf("用法: velaguard wifi status|scan|next|connect <SSID> [--no-save]\n");
+          return 1;
+        }
+
+      if (ret == -EBUSY)
+        {
+          printf("Wi-Fi 操作仍在进行，请稍后执行 wifi status\n");
+        }
+      else if (ret < 0)
+        {
+          printf("Wi-Fi 操作未启动: %d\n", ret);
+        }
+
+      vg_ui_set_page(VG_PAGE_NETWORK);
+      vg_print_page();
+      return ret < 0 ? 1 : 0;
+    }
+
+  if (strcmp(cmd, "console") == 0)
+    {
+      return vg_cmd_console(argc, argv);
+    }
+
   if (strcmp(cmd, "config") == 0)
     {
       vg_config_dump();
@@ -567,7 +786,7 @@ int main(int argc, char *argv[])
       if (argc < 3)
         {
           printf("用法: velaguard key <page|handled|false|snooze|enter|"
-                 "back|up|down>\n");
+                 "back|up|down|wifi_scan|wifi_select|wifi_connect|binding>\n");
           return 1;
         }
 
@@ -606,6 +825,14 @@ int main(int argc, char *argv[])
           else if (strcmp(argv[2], "more") == 0)
             {
               vg_ui_set_page(VG_PAGE_TEST_MORE);
+            }
+          else if (strcmp(argv[2], "network") == 0)
+            {
+              vg_ui_set_page(VG_PAGE_NETWORK);
+            }
+          else if (strcmp(argv[2], "binding") == 0)
+            {
+              vg_ui_set_page(VG_PAGE_BINDING);
             }
         }
 

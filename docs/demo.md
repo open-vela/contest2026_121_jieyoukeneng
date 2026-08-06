@@ -6,16 +6,15 @@
 ## 演示前准备（5 分钟）
 
 ```bash
-# 1) 笔记本起控制台（零 npm 依赖）
-cd prototype/console && node server.js
+# 1) 笔记本起控制台（零 npm 依赖；仅局域网演示允许匿名设备上传）
+cd prototype/console && VELAGUARD_ALLOW_ANONYMOUS_DEVICE=true node server.js
 #    记下笔记本的局域网 IP，例如 192.168.43.100
 
 # 2) 手机开热点，笔记本 + 设备连同一热点；手机浏览器打开
 #    http://192.168.43.100:8080/   ← 这就是"家属视角"
 
-# 3) 设备侧写配置（串口/nsh）
-#    cp config.example.json → /data/velaguard/config.json
-#    把 consoleHost 改成笔记本 IP
+# 3) 设备侧设置控制台地址（串口/nsh；会保存配置）
+#    velaguard console set 192.168.43.100 8080
 
 # 4) 部署 Skill（可选，不部署也能演示，通知会用内置模板文案）
 #    把 agent_skill/anling-home-safety/ 拷到 /data/agent/skills/
@@ -78,4 +77,4 @@ node inject_events.js --scenario 5 # 只演"急促呼喊升级"
 
 - 官方限 5 分钟：主线按 3 分钟设计，留 1.5 分钟讲复现步骤与 AI Coding 亮点。
 - 手机画面建议用投屏或分屏录制，让"设备响 → 手机弹卡片"的因果关系一眼可见。
-- 演示前跑一次 `cd tests && make test`，确保环境干净（21 项全绿再开录）。
+- 演示前跑一次 `cd tests && make test`，确保环境干净（49 项全绿再开录）。

@@ -11,6 +11,7 @@
 #include "velaguard/vg_event_sm.h"
 #include "velaguard/vg_input.h"
 #include "velaguard/vg_ui.h"
+#include "velaguard/vg_wifi.h"
 
 #ifndef CONFIG_VELAGUARD_BUTTON_DEVICE
 #  define CONFIG_VELAGUARD_BUTTON_DEVICE "/dev/buttons"
@@ -148,6 +149,10 @@ vg_action_t vg_input_parse(const char *s)
   if (strcmp(s, "back") == 0)        return VG_ACT_BACK;
   if (strcmp(s, "up") == 0)          return VG_ACT_SCROLL_UP;
   if (strcmp(s, "down") == 0)        return VG_ACT_SCROLL_DOWN;
+  if (strcmp(s, "wifi_scan") == 0)   return VG_ACT_WIFI_SCAN;
+  if (strcmp(s, "wifi_select") == 0) return VG_ACT_WIFI_SELECT;
+  if (strcmp(s, "wifi_connect") == 0) return VG_ACT_WIFI_CONNECT;
+  if (strcmp(s, "binding") == 0)    return VG_ACT_BINDING;
 
   return VG_ACT_NONE;
 }
@@ -206,6 +211,11 @@ void vg_input_dispatch(vg_action_t action)
           {
             vg_ui_wizard_start();
           }
+        else if (vg_ui_page() == VG_PAGE_NETWORK)
+          {
+            /* 物理按键只能连接开放网络；有密码的网络走触摸键盘或 CLI。 */
+            (void)vg_wifi_connect_selected("", true);
+          }
         break;
 
       case VG_ACT_BACK:
@@ -215,8 +225,21 @@ void vg_input_dispatch(vg_action_t action)
           }
         else
           {
-            vg_ui_set_page(vg_ui_page() == VG_PAGE_TEST_MORE ?
-                           VG_PAGE_TEST : VG_PAGE_HOME);
+            switch (vg_ui_page())
+              {
+                case VG_PAGE_TEST_MORE:
+                  vg_ui_set_page(VG_PAGE_TEST);
+                  break;
+
+                case VG_PAGE_NETWORK:
+                case VG_PAGE_BINDING:
+                  vg_ui_set_page(VG_PAGE_TEST_MORE);
+                  break;
+
+                default:
+                  vg_ui_set_page(VG_PAGE_HOME);
+                  break;
+              }
           }
         break;
 
@@ -238,6 +261,22 @@ void vg_input_dispatch(vg_action_t action)
 
       case VG_ACT_TEST_NETWORK:
         vg_diagnostics_start(VG_DIAG_NETWORK);
+        break;
+
+      case VG_ACT_WIFI_SCAN:
+        vg_wifi_start_scan();
+        break;
+
+      case VG_ACT_WIFI_SELECT:
+        vg_wifi_select(1);
+        break;
+
+      case VG_ACT_WIFI_CONNECT:
+        (void)vg_wifi_connect_selected("", true);
+        break;
+
+      case VG_ACT_BINDING:
+        vg_ui_set_page(VG_PAGE_BINDING);
         break;
 
       default:
