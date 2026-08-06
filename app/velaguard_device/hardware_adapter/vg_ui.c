@@ -3,15 +3,19 @@
  ****************************************************************************/
 
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "velaguard/vg_capture.h"
 #include "velaguard/vg_config.h"
+#include "velaguard/vg_daemon.h"
 #include "velaguard/vg_detector.h"
 #include "velaguard/vg_enroll.h"
 #include "velaguard/vg_event_log.h"
 #include "velaguard/vg_event_sm.h"
+#include "velaguard/vg_feature.h"
 #include "velaguard/vg_indicator.h"
 #include "velaguard/vg_time.h"
 #include "velaguard/vg_ui.h"
@@ -28,6 +32,9 @@ static int               g_wiz_kind;
 static int               g_wiz_phrase;
 static int               g_wiz_person;
 static int               g_wiz_style;
+static bool              g_wiz_restart_daemon;
+static volatile bool     g_wiz_capture_running;
+static pthread_mutex_t   g_wiz_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ASCII 备用名：串口调试和无中文字体的构建仍可使用。 */
 
@@ -84,52 +91,20 @@ static const char *vg_status_txt(vg_local_status_t s, bool ascii)
 
 static int vg_render_home(char *buf, size_t len, bool ascii)
 {
-  vg_detector_stats_t st;
   vg_safety_event_t last;
   size_t pos = 0;
-  char why[64];
-
-  vg_detector_stats(&st);
 
   VG_APPEND("%s\n", ascii ? "== VelaGuard / HOME ==" : "== 安聆 VelaGuard · 监测首页 ==");
 
-  VG_APPEND("%s: %s | %s: %s\n",
+  VG_APPEND("%s: %s\n",
             ascii ? "Guard" : "守护",
             vg_capture_paused() ?
               (ascii ? "PAUSED" : vg_capture_pause_reason()) :
-              (ascii ? "ON" : "守护中"),
-            ascii ? "Src" : "音源",
-            ascii ? (vg_capture_source() == VG_SRC_MIC ? "MIC" :
-                     vg_capture_source() == VG_SRC_WAV ? "WAV" : "SIM")
-                  : vg_capture_source_name());
+              (ascii ? "ON" : "守护中"));
 
-  VG_APPEND("%s: %s | %s: %s\n",
-            ascii ? "Net" : "上传",
-            vg_uploader_online() ? (ascii ? "ONLINE" : "在线")
-                                 : (ascii ? "OFFLINE" : "离线"),
-            ascii ? "Clock" : "时间",
+  VG_APPEND("%s: %s\n", ascii ? "Time" : "现在时间",
             vg_time_reliable() ? (ascii ? "SYNCED" : "已同步")
                                : (ascii ? "NOT SYNCED" : "未同步"));
-
-  if (!ascii)
-    {
-      VG_APPEND("夜间判定: %s\n", vg_night_reason());
-    }
-
-  VG_APPEND("%s: %d | %s: %d\n",
-            ascii ? "Pending upload" : "待发送通知", vg_uploader_pending(),
-            ascii ? "Active events" : "活跃事件", vg_sm_active_count());
-
-  VG_APPEND("%s: %s\n",
-            ascii ? "LED" : "指示灯",
-            ascii ? (vg_indicator_led() == VG_LED_EMERGENCY ? "RED" :
-                     vg_indicator_led() == VG_LED_WARNING ? "YELLOW" :
-                     vg_indicator_led() == VG_LED_PAUSED ? "BLUE" : "GREEN")
-                  : vg_indicator_led_text());
-
-  VG_APPEND("%s: %" PRIu32 " | %s: %" PRIu32 "us\n",
-            ascii ? "Windows" : "已处理窗口", st.windows,
-            ascii ? "Avg" : "平均耗时", st.avg_us);
 
   if (vg_event_log_get(0, &last) == 0)
     {
@@ -144,77 +119,8 @@ static int vg_render_home(char *buf, size_t len, bool ascii)
       VG_APPEND("%s\n", ascii ? "Last event: none" : "最近事件: 暂无");
     }
 
-  if (g_wizard != VG_WIZ_IDLE)
-    {
-      vg_tpl_kind_t kind = (vg_tpl_kind_t)g_wiz_kind;
-
-      VG_APPEND("---- %s ----\n",
-                ascii ? "ENROLL WIZARD" : "家庭称呼与求救词录入");
-
-      switch (g_wizard)
-        {
-          case VG_WIZ_PICK_KIND:
-            VG_APPEND("%s: %s\n",
-                      ascii ? "1/4 Kind" : "1/4 选择类别",
-                      g_wiz_kind == VG_TPL_NAME ?
-                        (ascii ? "NAME" : "姓名/称呼") :
-                      g_wiz_kind == VG_TPL_HELP ?
-                        (ascii ? "HELP" : "求救短语") :
-                        (ascii ? "DIALECT" : "方言短语"));
-            break;
-
-          case VG_WIZ_PICK_PHRASE:
-            VG_APPEND("%s: %s\n",
-                      ascii ? "2/4 Phrase" : "2/4 选择短语",
-                      vg_enroll_preset_phrase(kind, g_wiz_phrase));
-            break;
-
-          case VG_WIZ_PICK_PERSON:
-            VG_APPEND("%s: %s\n",
-                      ascii ? "3/4 Person" : "3/4 选择成员",
-                      vg_enroll_preset_person(g_wiz_person));
-            break;
-
-          case VG_WIZ_PICK_STYLE:
-            VG_APPEND("%s: %s\n",
-                      ascii ? "4/4 Style" : "4/4 表达方式",
-                      g_wiz_style == VG_TPL_URGENT ?
-                        (ascii ? "URGENT" : "急促") :
-                        (ascii ? "CALM" : "平静"));
-            break;
-
-          case VG_WIZ_RECORDING:
-            VG_APPEND("%s %d/%d\n",
-                      ascii ? "Recording take" : "采集次数",
-                      vg_enroll_takes(), VG_ENROLL_MIN_TAKES);
-            VG_APPEND("%s\n",
-                      ascii ? "Guard paused, only template stored"
-                            : "守护已暂停；只保存声学模板，不保存录音");
-            break;
-
-          case VG_WIZ_DONE:
-            VG_APPEND("%s\n", ascii ? "Saved" : "已保存模板");
-            break;
-
-          default:
-            break;
-        }
-    }
-  else
-    {
-      VG_APPEND("%s: %d %s\n",
-                ascii ? "Templates" : "已录入模板", vg_enroll_count(),
-                ascii ? "" : "条");
-
-      if (!vg_enroll_min_set_ready(why, sizeof(why)) && !ascii)
-        {
-          VG_APPEND("最小集自检: %s\n", why);
-        }
-
-      VG_APPEND("[%s] %s\n",
-                ascii ? "KEY1" : "按键1",
-                ascii ? "Enter enroll wizard" : "进入录入向导");
-    }
+  VG_APPEND("%s\n", ascii ? "Device checks and enrollment are under TEST."
+                            : "设备测试和家庭称呼录入请进入“测试”。");
 
   return (int)pos;
 }
@@ -345,25 +251,77 @@ static int vg_render_history(char *buf, size_t len, bool ascii)
   return (int)pos;
 }
 
-static int vg_render_settings(char *buf, size_t len, bool ascii)
+static int vg_render_test(char *buf, size_t len, bool ascii)
 {
   char ts[VG_TIMESTR_LEN];
   size_t pos = 0;
 
   vg_format_time(vg_wall_sec(), ts, sizeof(ts));
-  VG_APPEND("%s\n", ascii ? "== SETTINGS / TEST ==" : "== 设置与设备自检 ==");
+  VG_APPEND("%s\n", ascii ? "== TEST ==" : "== 测试与录入 ==");
   VG_APPEND("%s: %s\n", ascii ? "Date" : "日期",
             vg_time_reliable() ? ts : "时间未同步");
+  VG_APPEND("%s: %s\n", ascii ? "Microphone" : "麦克风",
+            ascii ? "button 1: capture test" : "按钮1：采集测试");
+  VG_APPEND("%s: %s\n", ascii ? "Playback" : "播放提示音",
+            vg_indicator_has_audio_out() ? (ascii ? "READY" : "已发现")
+                                         : (ascii ? "MISSING" : "未发现"));
+  VG_APPEND("%s\n", ascii ? "button 2: playback; button 3: enrollment"
+                            : "按钮2：播放测试；按钮3：录入家庭称呼");
+  VG_APPEND("%s\n", ascii ? "button 4: network; button 5: return"
+                            : "按钮4：网络测试；按钮5：返回主界面");
+  if (vg_ui_wizard_active())
+    {
+      vg_tpl_kind_t kind = (vg_tpl_kind_t)g_wiz_kind;
+
+      VG_APPEND("---- %s ----\n", ascii ? "ENROLLMENT" : "家庭称呼录入");
+      switch (g_wizard)
+        {
+          case VG_WIZ_PICK_KIND:
+            VG_APPEND("%s: %s\n", ascii ? "1/4 kind" : "1/4 类别",
+                      g_wiz_kind == VG_TPL_NAME ? "姓名/称呼" :
+                      g_wiz_kind == VG_TPL_HELP ? "求救短语" : "方言短语");
+            break;
+          case VG_WIZ_PICK_PHRASE:
+            VG_APPEND("%s: %s\n", ascii ? "2/4 phrase" : "2/4 短语",
+                      vg_enroll_preset_phrase(kind, g_wiz_phrase));
+            break;
+          case VG_WIZ_PICK_PERSON:
+            VG_APPEND("%s: %s\n", ascii ? "3/4 person" : "3/4 成员",
+                      vg_enroll_preset_person(g_wiz_person));
+            break;
+          case VG_WIZ_PICK_STYLE:
+            VG_APPEND("%s: %s\n", ascii ? "4/4 style" : "4/4 语气",
+                      g_wiz_style == VG_TPL_URGENT ? "急促" : "平静");
+            break;
+          case VG_WIZ_RECORDING:
+            VG_APPEND("%s %d/%d%s\n", ascii ? "Say the phrase" : "请说出短语",
+                      vg_enroll_takes(), VG_ENROLL_MIN_TAKES,
+                      g_wiz_capture_running ? "（采集中）" : "");
+            break;
+          case VG_WIZ_DONE:
+            VG_APPEND("%s\n", ascii ? "Saved" : "模板已保存");
+            break;
+          default:
+            break;
+        }
+    }
+  VG_APPEND("%s\n", ascii ? "Raw audio is temporary and never saved."
+                            : "原始声音只临时读取，不保存录音文件。");
+  return (int)pos;
+}
+
+static int vg_render_test_more(char *buf, size_t len, bool ascii)
+{
+  size_t pos = 0;
+
+  VG_APPEND("%s\n", ascii ? "== TEST / MORE ==" : "== 更多测试 ==");
   VG_APPEND("%s: %s\n", ascii ? "Network" : "网络",
             vg_uploader_online() ? (ascii ? "ONLINE" : "已连接")
                                  : (ascii ? "OFFLINE" : "未连接"));
-  VG_APPEND("%s: %s\n", ascii ? "Microphone" : "麦克风",
-            ascii ? "run test" : "点击下方按钮测试");
-  VG_APPEND("%s: %s\n", ascii ? "Speaker" : "扬声器",
-            vg_indicator_has_audio_out() ? (ascii ? "READY" : "已发现")
-                                         : (ascii ? "MISSING" : "未发现"));
-  VG_APPEND("%s\n", ascii ? "Tests do not save raw audio."
-                            : "测试只读取临时采样，不保存原始录音。");
+  VG_APPEND("%s\n", ascii ? "button 1: network test; button 2: test page"
+                            : "按钮1：网络测试；按钮2：返回测试页");
+  VG_APPEND("%s\n", ascii ? "button 5: home"
+                            : "按钮5：返回主界面");
   return (int)pos;
 }
 
@@ -448,8 +406,11 @@ int vg_ui_render(char *buf, size_t len, bool ascii)
       case VG_PAGE_HISTORY:
         return vg_render_history(buf, len, ascii);
 
-      case VG_PAGE_SETTINGS:
-        return vg_render_settings(buf, len, ascii);
+      case VG_PAGE_TEST:
+        return vg_render_test(buf, len, ascii);
+
+      case VG_PAGE_TEST_MORE:
+        return vg_render_test_more(buf, len, ascii);
 
       default:
         return vg_render_home(buf, len, ascii);
@@ -476,14 +437,105 @@ void vg_ui_history_scroll(int delta)
  * 录入向导 (PRD-02)
  ****************************************************************************/
 
+static void *vg_wizard_capture_worker(void *arg)
+{
+  int16_t pcm[VG_WINDOW_SAMPLES];
+  float feat[VG_FEATURE_DIM];
+  int got = 0;
+  int tries = 0;
+
+  (void)arg;
+  if (vg_capture_open(VG_SRC_MIC, NULL) < 0)
+    {
+      printf("[velaguard] 录入失败：无法打开麦克风\n");
+      goto done;
+    }
+
+  while (got < VG_WINDOW_SAMPLES && tries++ < 120)
+    {
+      int n = vg_capture_read(pcm + got, VG_WINDOW_SAMPLES - got);
+
+      if (n > 0)
+        {
+          got += n;
+        }
+      else
+        {
+          usleep(50000);
+        }
+    }
+
+  vg_capture_close();
+  if (got < VG_FRAME_LEN || vg_feature_extract(pcm, (size_t)got, feat) < 0)
+    {
+      printf("[velaguard] 录入失败：麦克风采样不足，请重试\n");
+      goto done;
+    }
+
+  pthread_mutex_lock(&g_wiz_lock);
+  if (g_wizard == VG_WIZ_RECORDING &&
+      vg_enroll_feed(feat) < 0)
+    {
+      printf("[velaguard] 录入失败：模板采样已达到上限\n");
+    }
+  pthread_mutex_unlock(&g_wiz_lock);
+
+done:
+  g_wiz_capture_running = false;
+  return NULL;
+}
+
+static int vg_wizard_capture_start(void)
+{
+  pthread_t thread;
+
+  if (g_wiz_capture_running)
+    {
+      printf("[velaguard] 录入采样正在进行，请稍候\n");
+      return -1;
+    }
+
+  g_wiz_capture_running = true;
+  if (pthread_create(&thread, NULL, vg_wizard_capture_worker, NULL) != 0)
+    {
+      g_wiz_capture_running = false;
+      printf("[velaguard] 录入采样线程启动失败\n");
+      return -1;
+    }
+
+  pthread_detach(thread);
+  printf("[velaguard] 已开始采集一段录入样本，请清晰说完选定短语\n");
+  return 0;
+}
+
+static void vg_wizard_audio_restore(void)
+{
+  if (g_wiz_restart_daemon)
+    {
+      (void)vg_daemon_start(VG_SRC_MIC, NULL);
+      g_wiz_restart_daemon = false;
+    }
+  else
+    {
+      vg_capture_resume();
+    }
+}
+
 void vg_ui_wizard_start(void)
 {
-  g_page = VG_PAGE_HOME;
+  g_page = VG_PAGE_TEST;
   g_wizard = VG_WIZ_PICK_KIND;
   g_wiz_kind = VG_TPL_NAME;
   g_wiz_phrase = 0;
   g_wiz_person = 0;
   g_wiz_style = VG_TPL_CALM;
+  g_wiz_restart_daemon = vg_daemon_running() &&
+                         vg_capture_source() == VG_SRC_MIC;
+
+  if (vg_daemon_running())
+    {
+      vg_daemon_stop();
+    }
 
   /* 录入与守护采集互斥（PRD-01） */
 
@@ -591,10 +643,14 @@ void vg_ui_wizard_confirm(void)
         break;
 
       case VG_WIZ_RECORDING:
-        if (vg_enroll_takes() >= VG_ENROLL_MIN_TAKES &&
-            vg_enroll_commit() >= 0)
+        if (vg_enroll_takes() < VG_ENROLL_MIN_TAKES)
+          {
+            (void)vg_wizard_capture_start();
+          }
+        else if (!g_wiz_capture_running && vg_enroll_commit() >= 0)
           {
             g_wizard = VG_WIZ_DONE;
+            vg_wizard_audio_restore();
           }
         break;
 
@@ -607,9 +663,15 @@ void vg_ui_wizard_confirm(void)
 
 void vg_ui_wizard_cancel(void)
 {
+  if (g_wiz_capture_running)
+    {
+      printf("[velaguard] 当前正在采集，请采集结束后再返回\n");
+      return;
+    }
+
   vg_enroll_cancel();
   g_wizard = VG_WIZ_IDLE;
-  vg_capture_resume();
+  vg_wizard_audio_restore();
   vg_indicator_set_led(VG_LED_GUARD);
 }
 

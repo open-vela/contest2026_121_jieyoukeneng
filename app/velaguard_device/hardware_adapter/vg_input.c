@@ -172,7 +172,8 @@ void vg_input_dispatch(vg_action_t action)
           {
             vg_ui_wizard_confirm();
           }
-        else if (vg_ui_page() == VG_PAGE_HOME)
+        else if (vg_ui_page() == VG_PAGE_HOME ||
+                 vg_ui_page() == VG_PAGE_TEST)
           {
             vg_ui_wizard_start();
           }
@@ -185,7 +186,8 @@ void vg_input_dispatch(vg_action_t action)
           }
         else
           {
-            vg_ui_set_page(VG_PAGE_HOME);
+            vg_ui_set_page(vg_ui_page() == VG_PAGE_TEST_MORE ?
+                           VG_PAGE_TEST : VG_PAGE_HOME);
           }
         break;
 

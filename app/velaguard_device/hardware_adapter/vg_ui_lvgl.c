@@ -25,6 +25,7 @@
 #include <lvgl/lvgl.h>
 
 #include "velaguard/vg_event_sm.h"
+#include "velaguard/vg_enroll.h"
 #include "velaguard/vg_input.h"
 #include "velaguard/vg_time.h"
 #include "velaguard/vg_types.h"
@@ -43,9 +44,9 @@ static volatile bool     g_running;
 static lv_obj_t         *g_label;
 static lv_obj_t         *g_clock;
 static lv_obj_t         *g_bar;
-static lv_obj_t         *g_buttons[4];
-static lv_obj_t         *g_button_labels[4];
-static vg_action_t       g_button_actions[4];
+static lv_obj_t         *g_buttons[5];
+static lv_obj_t         *g_button_labels[5];
+static vg_action_t       g_button_actions[5];
 static lv_nuttx_result_t g_result;
 
 extern const lv_font_t lv_font_simsun_16_cjk;
@@ -80,15 +81,35 @@ static void vg_lvgl_button_event(lv_event_t *event)
 {
   uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
 
-  if (index < 4)
+  if (index < 5)
     {
-      if (vg_ui_page() == VG_PAGE_HOME && index == 1)
+      if (vg_ui_page() == VG_PAGE_HOME && index == 0)
+        {
+          vg_ui_set_page(VG_PAGE_EVENT);
+        }
+      else if (vg_ui_page() == VG_PAGE_HOME && index == 1)
         {
           vg_ui_set_page(VG_PAGE_HISTORY);
         }
       else if (vg_ui_page() == VG_PAGE_HOME && index == 2)
         {
-          vg_ui_set_page(VG_PAGE_SETTINGS);
+          vg_ui_set_page(VG_PAGE_TEST);
+        }
+      else if (vg_ui_page() == VG_PAGE_TEST_MORE && index == 1)
+        {
+          vg_ui_set_page(VG_PAGE_TEST);
+        }
+      else if (vg_ui_page() == VG_PAGE_TEST_MORE && index == 3)
+        {
+          vg_ui_set_page(VG_PAGE_HOME);
+        }
+      else if (vg_ui_page() == VG_PAGE_HISTORY && index == 3)
+        {
+          vg_ui_set_page(VG_PAGE_TEST);
+        }
+      else if (vg_ui_page() == VG_PAGE_TEST_MORE && index == 4)
+        {
+          vg_ui_set_page(VG_PAGE_HOME);
         }
       else
         {
@@ -100,7 +121,7 @@ static void vg_lvgl_button_event(lv_event_t *event)
 static void vg_lvgl_set_button(unsigned int index, const char *text,
                                vg_action_t action)
 {
-  if (index >= 4)
+  if (index >= 5)
     {
       return;
     }
@@ -111,12 +132,22 @@ static void vg_lvgl_set_button(unsigned int index, const char *text,
 
 static void vg_lvgl_refresh_buttons(void)
 {
+  for (unsigned int i = 0; i < 5; i++)
+    {
+      lv_obj_clear_flag(g_buttons[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
   if (vg_ui_wizard_active())
     {
       vg_lvgl_set_button(0, "上一步", VG_ACT_HANDLED);
-      vg_lvgl_set_button(1, "下一项", VG_ACT_PAGE);
-      vg_lvgl_set_button(2, "确认", VG_ACT_ENTER);
+      vg_lvgl_set_button(1, vg_ui_wizard_state() == VG_WIZ_RECORDING ?
+                         "采集" : "下一项",
+                         vg_ui_wizard_state() == VG_WIZ_RECORDING ?
+                         VG_ACT_ENTER : VG_ACT_PAGE);
+      vg_lvgl_set_button(2, vg_ui_wizard_state() == VG_WIZ_RECORDING ?
+                         "保存" : "确认", VG_ACT_ENTER);
       vg_lvgl_set_button(3, "取消", VG_ACT_BACK);
+      lv_obj_add_flag(g_buttons[4], LV_OBJ_FLAG_HIDDEN);
       return;
     }
 
@@ -131,24 +162,44 @@ static void vg_lvgl_refresh_buttons(void)
 
       case VG_PAGE_HISTORY:
         vg_lvgl_set_button(0, "上一页", VG_ACT_SCROLL_UP);
-        vg_lvgl_set_button(1, "首页", VG_ACT_BACK);
+        vg_lvgl_set_button(1, "返回", VG_ACT_BACK);
         vg_lvgl_set_button(2, "下一页", VG_ACT_SCROLL_DOWN);
-        vg_lvgl_set_button(3, "设置", VG_ACT_PAGE);
+        vg_lvgl_set_button(3, "测试", VG_ACT_PAGE);
         break;
 
-      case VG_PAGE_SETTINGS:
+      case VG_PAGE_TEST:
         vg_lvgl_set_button(0, "麦克风", VG_ACT_TEST_MIC);
-        vg_lvgl_set_button(1, "扬声器", VG_ACT_TEST_SPEAKER);
-        vg_lvgl_set_button(2, "网络", VG_ACT_TEST_NETWORK);
-        vg_lvgl_set_button(3, "返回", VG_ACT_BACK);
+        vg_lvgl_set_button(1, "播放", VG_ACT_TEST_SPEAKER);
+        vg_lvgl_set_button(2, "录入", VG_ACT_ENTER);
+        vg_lvgl_set_button(3, "网络", VG_ACT_TEST_NETWORK);
+        vg_lvgl_set_button(4, "返回", VG_ACT_BACK);
+        break;
+
+      case VG_PAGE_TEST_MORE:
+        vg_lvgl_set_button(0, "网络", VG_ACT_TEST_NETWORK);
+        vg_lvgl_set_button(1, "测试页", VG_ACT_BACK);
+        vg_lvgl_set_button(2, "", VG_ACT_NONE);
+        vg_lvgl_set_button(3, "", VG_ACT_NONE);
+        vg_lvgl_set_button(4, "首页", VG_ACT_BACK);
         break;
 
       default:
         vg_lvgl_set_button(0, "事件", VG_ACT_PAGE);
         vg_lvgl_set_button(1, "历史", VG_ACT_NONE);
-        vg_lvgl_set_button(2, "设置", VG_ACT_NONE);
-        vg_lvgl_set_button(3, "录入", VG_ACT_ENTER);
+        vg_lvgl_set_button(2, "测试", VG_ACT_NONE);
+        vg_lvgl_set_button(3, "", VG_ACT_NONE);
+        vg_lvgl_set_button(4, "", VG_ACT_NONE);
         break;
+    }
+
+  if (vg_ui_page() == VG_PAGE_HOME)
+    {
+      lv_obj_add_flag(g_buttons[3], LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(g_buttons[4], LV_OBJ_FLAG_HIDDEN);
+    }
+  else if (vg_ui_page() != VG_PAGE_TEST && vg_ui_page() != VG_PAGE_TEST_MORE)
+    {
+      lv_obj_add_flag(g_buttons[4], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -236,11 +287,11 @@ static void *vg_lvgl_thread(void *arg)
   lv_obj_set_style_text_color(g_clock, lv_color_hex(0x9fb6c9), 0);
   lv_label_set_text(g_clock, "时间未同步");
 
-  for (unsigned int i = 0; i < 4; i++)
+  for (unsigned int i = 0; i < 5; i++)
     {
       g_buttons[i] = lv_button_create(lv_screen_active());
-      lv_obj_set_size(g_buttons[i], 76, 40);
-      lv_obj_set_pos(g_buttons[i], 4 + (int)i * 80, 194);
+      lv_obj_set_size(g_buttons[i], 60, 40);
+      lv_obj_set_pos(g_buttons[i], 2 + (int)i * 64, 194);
       lv_obj_set_style_radius(g_buttons[i], 6, 0);
       lv_obj_set_style_bg_color(g_buttons[i], lv_color_hex(0x28547a), 0);
       lv_obj_set_style_bg_color(g_buttons[i], lv_color_hex(0x3978a8),

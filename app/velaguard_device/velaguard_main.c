@@ -55,7 +55,7 @@ static void vg_usage(void)
     "       --urgency <0~1>  --repeat <n>  --times <n>  --interval <ms>\n"
     "  ack [<eventId>] <handled|false_alarm|snooze>\n"
     "  key <page|handled|false|snooze|enter|back|up|down>\n"
-    "  ui [home|event|history]      打印当前页面（LCD 同款内容）\n"
+    "  ui [home|event|history|test|more] 打印当前页面（LCD 同款内容）\n"
     "  log [n]                      打印最近 n 条事件（默认 10）\n"
     "  logjson [n]                  以 JSON 数组输出（联调用）\n"
     "\n"
@@ -598,6 +598,14 @@ int main(int argc, char *argv[])
           else if (strcmp(argv[2], "history") == 0)
             {
               vg_ui_set_page(VG_PAGE_HISTORY);
+            }
+          else if (strcmp(argv[2], "test") == 0)
+            {
+              vg_ui_set_page(VG_PAGE_TEST);
+            }
+          else if (strcmp(argv[2], "more") == 0)
+            {
+              vg_ui_set_page(VG_PAGE_TEST_MORE);
             }
         }
 
