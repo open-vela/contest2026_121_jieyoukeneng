@@ -22,6 +22,7 @@
 
 static int      g_btn_fd = -1;
 static uint32_t g_last_mask;
+static const char *g_btn_path;
 
 /****************************************************************************
  * Public Functions
@@ -29,12 +30,38 @@ static uint32_t g_last_mask;
 
 int vg_input_init(void)
 {
-  g_btn_fd = open(CONFIG_VELAGUARD_BUTTON_DEVICE, O_RDONLY | O_NONBLOCK);
+  static const char *const paths[] =
+    {
+      CONFIG_VELAGUARD_BUTTON_DEVICE,
+      "/dev/input/event1"
+    };
+  unsigned int i;
+
+  g_btn_path = NULL;
+  for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
+    {
+      if (i > 0 && strcmp(paths[i], paths[0]) == 0)
+        {
+          continue;
+        }
+
+      g_btn_fd = open(paths[i], O_RDONLY | O_NONBLOCK);
+      if (g_btn_fd >= 0)
+        {
+          g_btn_path = paths[i];
+          break;
+        }
+    }
+
   if (g_btn_fd < 0)
     {
       printf("[velaguard] 未检测到按键设备(%s)，"
-             "请用串口命令 velaguard key <动作> 操作\n",
+             "请用触摸屏或串口命令 velaguard key <动作> 操作\n",
              CONFIG_VELAGUARD_BUTTON_DEVICE);
+    }
+  else if (strcmp(g_btn_path, CONFIG_VELAGUARD_BUTTON_DEVICE) != 0)
+    {
+      printf("[velaguard] 按键设备使用兼容节点(%s)\n", g_btn_path);
     }
 
   g_last_mask = 0;
@@ -48,6 +75,8 @@ void vg_input_deinit(void)
       close(g_btn_fd);
       g_btn_fd = -1;
     }
+
+  g_btn_path = NULL;
 }
 
 bool vg_input_has_buttons(void)
@@ -57,7 +86,7 @@ bool vg_input_has_buttons(void)
 
 vg_action_t vg_input_poll(void)
 {
-  uint8_t raw = 0;
+  uint32_t raw = 0;
   uint32_t mask;
   uint32_t pressed;
 
