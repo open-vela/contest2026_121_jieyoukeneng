@@ -24,6 +24,7 @@
 
 #include "velaguard/vg_agent.h"
 #include "velaguard/vg_classifier.h"
+#include "velaguard/vg_capture.h"
 #include "velaguard/vg_config.h"
 #include "velaguard/vg_daemon.h"
 #include "velaguard/vg_detector.h"
@@ -418,6 +419,9 @@ int vg_daemon_stop(void)
 
   pthread_join(g_thread, NULL);
 #endif
+
+  /* 守护退出后释放音频句柄，录入或自检才能重新占用麦克风。 */
+  vg_capture_close();
 
   return 0;
 }

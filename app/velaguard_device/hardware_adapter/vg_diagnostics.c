@@ -20,14 +20,17 @@
 
 static pthread_mutex_t g_diag_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_diag_running;
+static vg_diag_state_t g_diag_state = VG_DIAG_IDLE;
 
 static void *vg_diag_worker(void *arg)
 {
   vg_diag_kind_t kind = (vg_diag_kind_t)(uintptr_t)arg;
 
-  (void)vg_diagnostics_run(kind);
+  int result = vg_diagnostics_run(kind);
+
   pthread_mutex_lock(&g_diag_lock);
   g_diag_running = false;
+  g_diag_state = result == 0 ? VG_DIAG_PASSED : VG_DIAG_FAILED;
   pthread_mutex_unlock(&g_diag_lock);
   return NULL;
 }
@@ -162,10 +165,12 @@ int vg_diagnostics_start(vg_diag_kind_t kind)
     }
 
   g_diag_running = true;
+  g_diag_state = VG_DIAG_RUNNING;
   if (pthread_create(&thread, NULL, vg_diag_worker,
                      (void *)(uintptr_t)kind) != 0)
     {
       g_diag_running = false;
+      g_diag_state = VG_DIAG_FAILED;
       pthread_mutex_unlock(&g_diag_lock);
       printf("板端自检启动失败\n");
       return -1;
@@ -184,4 +189,14 @@ bool vg_diagnostics_running(void)
   running = g_diag_running;
   pthread_mutex_unlock(&g_diag_lock);
   return running;
+}
+
+vg_diag_state_t vg_diagnostics_state(void)
+{
+  vg_diag_state_t state;
+
+  pthread_mutex_lock(&g_diag_lock);
+  state = g_diag_state;
+  pthread_mutex_unlock(&g_diag_lock);
+  return state;
 }
