@@ -329,6 +329,10 @@ static int vg_render_test_more(char *buf, size_t len, bool ascii)
   VG_APPEND("%s: %s\n", ascii ? "Network" : "网络",
             vg_uploader_online() ? (ascii ? "ONLINE" : "已连接")
                                  : (ascii ? "OFFLINE" : "未连接"));
+  VG_APPEND("%s\n", ascii ? "WiFi setup: use wapi or config file"
+                            : "Wi-Fi配网：使用wapi或配置文件");
+  VG_APPEND("%s: %s:%d\n", ascii ? "Console" : "控制台",
+            vg_config()->console_host, vg_config()->console_port);
   VG_APPEND("%s\n", ascii ? "button 1: network test; button 2: test page"
                             : "按钮1：网络测试；按钮2：返回测试页");
   VG_APPEND("%s\n", ascii ? "button 5: home"
