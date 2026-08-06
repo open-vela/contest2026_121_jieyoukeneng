@@ -279,13 +279,15 @@ static void *vg_lvgl_thread(void *arg)
   g_bar = lv_obj_create(lv_screen_active());
   lv_obj_set_size(g_bar, LV_PCT(100), 8);
   lv_obj_align(g_bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_pad_all(g_bar, 0, 0);
   lv_obj_set_style_border_width(g_bar, 0, 0);
+  lv_obj_set_style_outline_width(g_bar, 0, 0);
   lv_obj_set_style_radius(g_bar, 0, 0);
 
   g_label = lv_label_create(lv_screen_active());
   lv_obj_set_width(g_label, LV_PCT(96));
-  lv_obj_set_height(g_label, 166);
-  lv_obj_align(g_label, LV_ALIGN_TOP_LEFT, 6, 16);
+  lv_obj_set_height(g_label, 158);
+  lv_obj_align(g_label, LV_ALIGN_TOP_LEFT, 6, 28);
   lv_label_set_long_mode(g_label, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_font(g_label, &lv_font_simsun_16_cjk, 0);
   lv_obj_set_style_text_color(g_label, lv_color_hex(0xe8eaf0), 0);
@@ -293,7 +295,7 @@ static void *vg_lvgl_thread(void *arg)
 
   g_clock = lv_label_create(lv_screen_active());
   lv_obj_set_width(g_clock, LV_PCT(96));
-  lv_obj_align(g_clock, LV_ALIGN_TOP_RIGHT, -6, 8);
+  lv_obj_align(g_clock, LV_ALIGN_TOP_RIGHT, -6, 9);
   lv_obj_set_style_text_align(g_clock, LV_TEXT_ALIGN_RIGHT, 0);
   lv_obj_set_style_text_font(g_clock, &lv_font_simsun_16_cjk, 0);
   lv_obj_set_style_text_color(g_clock, lv_color_hex(0x9fb6c9), 0);
