@@ -40,6 +40,7 @@ SRCS := \
   $(APP_DIR)/hardware_adapter/vg_input.c \
   $(APP_DIR)/hardware_adapter/vg_diagnostics.c \
   $(APP_DIR)/hardware_adapter/vg_ui.c \
+  $(APP_DIR)/hardware_adapter/vg_wifi.c \
   $(APP_DIR)/velaguard_daemon.c
 
 MAIN     := $(APP_DIR)/velaguard_main.c

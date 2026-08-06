@@ -66,7 +66,7 @@ config VELAGUARD_AUDIO_OUT_DEVICE
 config VELAGUARD_UI_LVGL
 	bool "启用 LVGL LCD 界面"
 	default n
-	depends on GRAPHICS_LVGL && LV_USE_NUTTX
+	depends on GRAPHICS_LVGL && LV_USE_NUTTX && LV_USE_KEYBOARD && LV_USE_TEXTAREA
 	---help---
 		在板载 LCD 上显示监测首页 / 事件确认页 / 历史记录页。
 		关闭时仍可通过 velaguard ui 命令查看完全相同的页面内容。
@@ -77,5 +77,14 @@ config VELAGUARD_UI_STACKSIZE
 	depends on VELAGUARD_UI_LVGL
 	---help---
 		LVGL 初始化和 LCD 刷新需要比普通守护任务更大的线程栈。
+
+config VELAGUARD_WIFI_STACKSIZE
+	int "Wi-Fi 配网任务栈大小"
+	depends on WIRELESS_WAPI
+	range 32768 1048576
+	default 204800
+	---help---
+		WAPI 扫描和 DHCP 使用官方配网任务的栈预算（200 KiB），避免在后台
+		连接时因 DHCP 调用链栈空间不足而崩溃。任务只在扫描或连接期间创建。
 
 endif

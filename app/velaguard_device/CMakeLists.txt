@@ -30,6 +30,7 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_121_VELAGUARD)
       hardware_adapter/vg_input.c
       hardware_adapter/vg_diagnostics.c
       hardware_adapter/vg_ui.c
-      hardware_adapter/vg_ui_lvgl.c)
+      hardware_adapter/vg_ui_lvgl.c
+      hardware_adapter/vg_wifi.c)
 
 endif()

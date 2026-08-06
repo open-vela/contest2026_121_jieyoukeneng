@@ -72,11 +72,21 @@
     max-width: 720px; margin: 12px auto 0; padding: 0 12px;
   }
   .pairing summary { cursor: pointer; color: #9fb6c9; }
-  .pairing form { display: flex; gap: 8px; margin-top: 8px; }
-  .pairing input { min-width: 0; flex: 1; padding: 9px; border: 1px solid var(--line);
+  .pairing form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 8px; margin-top: 8px; }
+  .pairing input { min-width: 0; padding: 9px; border: 1px solid var(--line);
     border-radius: 8px; background: #171c26; color: var(--text); }
   .pairing button { flex: 0 0 96px; }
+  .pairing-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .pairing-actions button { flex: 0 0 auto; }
+  .pairing-actions button[hidden] { display: none; }
   #pairingMsg { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #pairingHint { color: #9fb6c9; font-size: 12px; margin-top: 6px; }
+  @media (max-width: 560px) {
+    .pairing form { grid-template-columns: minmax(0, 1fr) auto; }
+    .pairing input:first-child { grid-column: 1 / -1; }
+    .pairing button { min-width: 88px; }
+  }
 </style>
 </head>
 <body>
@@ -87,15 +97,20 @@
 </header>
 
 <section class="pairing">
-  <details>
-    <summary>设备配对</summary>
+  <details id="pairingDetails">
+    <summary>设备配对（首次使用）</summary>
     <form id="pairingForm">
-      <input id="pairingDevice" placeholder="设备编号，例如 velaguard_demo_001" autocomplete="off">
-      <input id="pairingKey" type="password" placeholder="配对密钥" autocomplete="off">
+      <input id="pairingDevice" placeholder="设备编号，例如 velaguard_demo_001" autocomplete="off" spellcheck="false">
+      <input id="pairingKey" type="password" placeholder="配对密钥" autocomplete="off" spellcheck="false">
       <button type="submit">配对</button>
     </form>
+    <div id="pairingHint"></div>
     <div id="pairingMsg"></div>
   </details>
+  <div class="pairing-actions">
+    <button id="enableAudio" type="button" hidden>启用提示音</button>
+    <button id="logoutPairing" type="button" hidden>解除本机绑定</button>
+  </div>
 </section>
 
 <main>
@@ -121,18 +136,25 @@ const STATUS_CN = {
   pending: '待处理', handled: '已处理', false_alarm: '误报',
   snoozed: '稍后提醒', no_response: '无人响应',
 };
+const COMMAND_STATUS_CN = {
+  requested: '已请求设备执行', received: '设备已收到', applied: '设备已执行',
+  rejected: '设备拒绝执行', requires_local_confirmation: '待本地确认',
+  expired: '命令已过期', stale: '命令已过期或版本过旧',
+  duplicate: '设备已处理', failed: '设备执行失败',
+};
 
 const list = document.getElementById('list');
 const empty = document.getElementById('empty');
 const dot = document.getElementById('dot');
 const sub = document.getElementById('sub');
+const pairingDetails = document.getElementById('pairingDetails');
+const pairingHint = document.getElementById('pairingHint');
+const pairingAudio = document.getElementById('enableAudio');
+const pairingLogout = document.getElementById('logoutPairing');
 const seen = new Map();
+const eventCache = new Map();
+const commandRecords = new Map();
 const commandStates = new Map();
-let sessionToken = localStorage.getItem('velaguard_session') || '';
-
-function authHeaders(extra = {}) {
-  return sessionToken ? { ...extra, Authorization: `Bearer ${sessionToken}` } : extra;
-}
 
 function fmtTime(iso) {
   if (!iso) return '';
@@ -143,6 +165,7 @@ function fmtTime(iso) {
 }
 
 function render(evt) {
+  eventCache.set(evt.eventId, evt);
   let card = seen.get(evt.eventId);
   if (!card) {
     card = document.createElement('div');
@@ -152,7 +175,14 @@ function render(evt) {
 
   const pending = evt.localStatus === 'pending' || evt.localStatus === 'no_response';
   const commandState = commandStates.get(evt.eventId);
-  const canAct = ['pending', 'no_response', 'snoozed'].includes(evt.localStatus);
+  const command = commandRecords.get(evt.eventId);
+  const commandInFlight = command &&
+    !['rejected', 'failed', 'expired', 'stale'].includes(command.status);
+  const canAct = !commandInFlight &&
+    ['pending', 'no_response', 'snoozed'].includes(evt.localStatus);
+  const typeText = TYPE_CN[evt.eventType] || evt.eventType;
+  const levelText = LEVEL_CN[evt.level] || evt.level;
+  const statusText = STATUS_CN[evt.localStatus] || evt.localStatus;
   card.className = `card ${evt.level}${pending ? ' pending' : ''}`;
 
   const extra = [];
@@ -164,25 +194,34 @@ function render(evt) {
 
   card.innerHTML = `
     <div class="row">
-      <span class="type">${TYPE_CN[evt.eventType] || evt.eventType}</span>
-      <span class="badge ${evt.level}">${LEVEL_CN[evt.level] || evt.level}</span>
-      <span class="badge status">${STATUS_CN[evt.localStatus] || evt.localStatus}</span>
-      <span class="time">${fmtTime(evt.startedAt)}</span>
+      <span class="type">${escapeHtml(typeText)}</span>
+      <span class="badge ${evt.level}">${escapeHtml(levelText)}</span>
+      <span class="badge status">${escapeHtml(statusText)}</span>
+      <span class="time">${escapeHtml(fmtTime(evt.startedAt))}</span>
     </div>
     <div class="summary">${escapeHtml(evt.summary || '')}</div>
     ${evt.advice ? `<div class="advice"><b>建议</b> ${escapeHtml(evt.advice)}</div>` : ''}
     <div class="meta">
       持续 ${evt.durationSec || 0} 秒 · 置信度 ${((evt.confidence || 0) * 100).toFixed(0)}%
-      · ${evt.deviceId}${extra.length ? ' · ' + extra.join(' · ') : ''}
+      · ${escapeHtml(evt.deviceId)}${extra.length ? ' · ' + extra.map(escapeHtml).join(' · ') : ''}
     </div>
     ${commandState ? `<div class="command">命令状态：${escapeHtml(commandState)}</div>` : ''}
     ${canAct ? `<div class="acts">
-      <button data-id="${evt.eventId}" data-rev="${evt.eventRevision || 1}" data-st="handled">已联系/已处理</button>
-      <button data-id="${evt.eventId}" data-rev="${evt.eventRevision || 1}" data-st="false_alarm">误报</button>
-      <button data-id="${evt.eventId}" data-rev="${evt.eventRevision || 1}" data-st="snooze">稍后提醒</button>
+      <button data-id="${escapeHtml(evt.eventId)}" data-rev="${escapeHtml(evt.eventRevision || 1)}" data-st="handled">已联系/已处理</button>
+      <button data-id="${escapeHtml(evt.eventId)}" data-rev="${escapeHtml(evt.eventRevision || 1)}" data-st="false_alarm">误报</button>
+      <button data-id="${escapeHtml(evt.eventId)}" data-rev="${escapeHtml(evt.eventRevision || 1)}" data-st="snooze">稍后提醒</button>
     </div>` : ''}`;
 
   empty.style.display = seen.size ? 'none' : '';
+}
+
+function updateCommandState(command) {
+  if (!command || !command.eventId) return;
+  commandRecords.set(command.eventId, command);
+  commandStates.set(command.eventId,
+    COMMAND_STATUS_CN[command.status] || `命令状态：${command.status}`);
+  const evt = eventCache.get(command.eventId);
+  if (evt) render(evt);
 }
 
 function escapeHtml(s) {
@@ -198,7 +237,11 @@ list.addEventListener('click', async (e) => {
   try {
     const r = await fetch(`/events/${btn.dataset.id}/commands`, {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': `phone_${btn.dataset.id}_${btn.dataset.rev}_${btn.dataset.st}`,
+      },
       body: JSON.stringify({
         action: btn.dataset.st,
         desiredRevision: Number(btn.dataset.rev),
@@ -206,12 +249,14 @@ list.addEventListener('click', async (e) => {
     });
     const result = await r.json();
     if (!r.ok) throw new Error(result.error || '命令被拒绝');
-    commandStates.set(btn.dataset.id,
-      result.requiresLocalConfirmation ? '待设备本地确认' : '已请求设备执行');
+    updateCommandState(result.command);
     if (result.event) render(result.event);
   } catch (error) {
+    commandRecords.delete(btn.dataset.id);
     commandStates.set(btn.dataset.id, `请求失败：${error.message}`);
     const card = seen.get(btn.dataset.id);
+    const evt = eventCache.get(btn.dataset.id);
+    if (evt) render(evt);
     if (card) card.querySelectorAll('button').forEach((item) => { item.disabled = false; });
   }
   btn.disabled = false;
@@ -219,8 +264,25 @@ list.addEventListener('click', async (e) => {
 
 /* 紧急事件提示音：Web Audio 合成，避免额外资源文件 */
 let audioCtx;
+let audioReady = false;
+
+async function enableAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.resume) await audioCtx.resume();
+    audioReady = audioCtx.state === 'running';
+    if (!audioReady) throw new Error('浏览器仍未授权');
+    pairingAudio.textContent = '提示音已启用';
+    pairingAudio.disabled = true;
+  } catch (error) {
+    pairingAudio.disabled = false;
+    document.getElementById('pairingMsg').textContent =
+      `提示音未启用：${error.message}`;
+  }
+}
+
 function beep(level) {
-  if (level === 'notice') return;
+  if (level === 'notice' || !audioReady) return;
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     const times = level === 'emergency' ? 4 : 2;
@@ -240,15 +302,42 @@ function beep(level) {
 
 async function bootstrap() {
   try {
-    const r = await fetch('/events?limit=100', { headers: authHeaders() });
+    const r = await fetch('/events?limit=100', { credentials: 'same-origin' });
+    if (r.status === 401) {
+      dot.classList.remove('on');
+      sub.textContent = '请先完成配对';
+      return false;
+    }
+    if (!r.ok) throw new Error('事件读取失败');
     const j = await r.json();
-    (j.events || []).slice().reverse().forEach(render);
-  } catch { /* 离线，等 SSE */ }
+    const events = j.events || [];
+    events.slice().reverse().forEach(render);
+    await loadCommandStates(events);
+    return true;
+  } catch {
+    sub.textContent = '控制台暂不可用';
+    return false;
+  }
+}
+
+async function loadCommandStates(events) {
+  await Promise.all(events.map(async (evt) => {
+    try {
+      const response = await fetch(
+        `/events/${encodeURIComponent(evt.eventId)}/commands`,
+        { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (result.commands && result.commands[0]) {
+        updateCommandState(result.commands[0]);
+      }
+    } catch { /* 事件本身仍可展示 */ }
+  }));
 }
 
 function connect() {
-  const streamUrl = sessionToken ? `/stream?session=${encodeURIComponent(sessionToken)}` : '/stream';
-  const es = new EventSource(streamUrl);
+  const es = new EventSource('/stream');
+  let recovering = false;
   es.addEventListener('hello', () => {
     dot.classList.add('on');
     sub.textContent = '已连接';
@@ -260,13 +349,62 @@ function connect() {
     if (navigator.vibrate) navigator.vibrate(evt.level === 'emergency' ? [200, 100, 200] : 120);
   });
   es.addEventListener('update', (m) => render(JSON.parse(m.data)));
+  es.addEventListener('command-result', (m) => {
+    updateCommandState(JSON.parse(m.data));
+  });
   es.onerror = () => {
     dot.classList.remove('on');
     sub.textContent = '连接中断，自动重连中…';
+    if (recovering) return;
+    recovering = true;
+    loadPairingState().then(async (paired) => {
+      if (!paired) {
+        es.close();
+        return;
+      }
+      /* SSE 断线期间可能漏掉事件；先补历史，再让 EventSource 自动重连。 */
+      await bootstrap();
+    }).finally(() => { recovering = false; });
   };
 }
 
-bootstrap().then(connect);
+async function loadPairingState() {
+  try {
+    const response = await fetch('/pairing', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (result.deviceId && !document.getElementById('pairingDevice').value) {
+      document.getElementById('pairingDevice').value = result.deviceId;
+    }
+    pairingHint.textContent = result.deviceId
+      ? `已识别演示设备 ${result.deviceId}，请输入控制台终端中的配对密钥`
+      : '请输入设备编号和控制台管理员提供的配对密钥';
+    if (result.paired) {
+      pairingDetails.open = false;
+      pairingAudio.hidden = false;
+      pairingLogout.hidden = false;
+      sub.textContent = `已绑定 ${result.pairedDeviceId || ''}`;
+      return true;
+    }
+    pairingDetails.open = true;
+    pairingAudio.hidden = true;
+    pairingLogout.hidden = true;
+    sub.textContent = '请先完成配对';
+  } catch {
+    pairingHint.textContent = '无法读取配对状态';
+    pairingAudio.hidden = true;
+    pairingLogout.hidden = true;
+  }
+  return false;
+}
+
+loadPairingState().then((paired) => {
+  if (paired) bootstrap().then((ready) => { if (ready) connect(); });
+});
+
+pairingAudio.addEventListener('click', enableAudio);
 
 document.getElementById('pairingForm').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -274,6 +412,7 @@ document.getElementById('pairingForm').addEventListener('submit', async (event) 
   try {
     const response = await fetch('/pairing', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         deviceId: document.getElementById('pairingDevice').value.trim(),
@@ -282,12 +421,28 @@ document.getElementById('pairingForm').addEventListener('submit', async (event) 
     });
     const result = await response.json();
     if (!response.ok) throw new Error('密钥错误或设备不匹配');
-    sessionToken = result.sessionToken;
-    localStorage.setItem('velaguard_session', sessionToken);
+    document.getElementById('pairingKey').value = '';
     msg.textContent = '配对成功，正在重新连接设备';
     setTimeout(() => window.location.reload(), 250);
   } catch (error) {
     msg.textContent = `配对失败：${error.message}`;
+  }
+});
+
+pairingLogout.addEventListener('click', async () => {
+  const msg = document.getElementById('pairingMsg');
+  pairingLogout.disabled = true;
+  try {
+    const response = await fetch('/pairing', {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error('注销失败');
+    window.location.reload();
+  } catch (error) {
+    pairingLogout.disabled = false;
+    msg.textContent = `解除绑定失败：${error.message}`;
   }
 });
 </script>

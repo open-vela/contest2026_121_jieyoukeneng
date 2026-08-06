@@ -6,7 +6,7 @@
 > 每个用例给出：操作 → **预期结果** → 判定标准。预期结果里带具体数字的，
 > 都是本仓已实测过的值，可直接对照。
 >
-> 自动化部分见 `tests/run_tests.sh`（21 项，环境完整时）与 `velaguard selftest`（25 项）；
+> 自动化部分见 `tests/run_tests.sh`（49 项，环境完整时）与 `velaguard selftest`（25 项）；
 > 本手册覆盖的是**自动化测不了或需要人眼确认**的部分。
 
 ---
@@ -752,7 +752,7 @@ velaguard enroll list      # 看最小集自检提示
 改任何代码后，至少跑这三条再继续：
 
 ```bash
-cd tests && make test                    # 主机侧 21 项（环境完整时）
+cd tests && make test                    # 主机侧 49 项（环境完整时）
 ```
 
 ```sh

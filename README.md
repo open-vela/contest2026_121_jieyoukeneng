@@ -72,7 +72,7 @@ contest2026_121_jieyoukeneng/
 ├── model/                       # 数据登记表、特征、合成自举数据集、训练与 int8 量化导出
 ├── prototype/console/           # 通知与演示控制台（Node 零依赖 + SQLite + SSE）
 ├── prototype/simulate/          # 五类模拟事件注入脚本（板前联调 + 演示兜底）
-├── tests/                       # 主机侧回归（21 项断言，环境完整时）+ 特征一致性校验 + 性能标定
+├── tests/                       # 主机侧回归（49 项断言，环境完整时）+ 特征一致性校验 + 性能标定
 ├── docs/                        # 架构说明、验收对照与实测结果、演示脚本
 ├── logs/                        # AI Coding 日志
 ├── config.example.json          # 配置模板（真实配置含凭证，不进 Git）
@@ -94,7 +94,7 @@ make && make test
 
 ```
 ======================================
-  回归结果：通过 21 项，失败 0 项
+  回归结果：通过 49 项，失败 0 项
 ======================================
 ```
 
@@ -136,14 +136,17 @@ velaguard status                   # 运行状态、性能、硬件可用性
 
 ```bash
 # 终端 1：起控制台（零 npm 依赖，Node >= 22.5）
-cd prototype/console && node server.js
+cd prototype/console && VELAGUARD_ALLOW_ANONYMOUS_DEVICE=true node server.js
 
 # 手机/浏览器打开 http://<笔记本局域网IP>:8080/   ← 家属视角
 
 # 终端 2：注入事件（板前联调或演示兜底）
 cd prototype/simulate && node inject_events.js
 
-# 或者从设备上传（先把 consoleHost 写进 /data/velaguard/config.json）
+# 开发板串口设置电脑的局域网 IP（会保存到 /data/velaguard/config.json）
+velaguard console set <笔记本局域网IP> 8080
+
+# 或者从设备上传
 velaguard notify test
 ```
 
@@ -210,7 +213,7 @@ POST 摘要、断网入队、恢复补发，全部不需要人介入。
 类别与置信度、决策全部在状态机——这个边界是设计时定死的，后面没有反复。
 
 **自动化验证代替人工点检**：`velaguard selftest` 的 25 项断言和
-`tests/run_tests.sh` 的 21 项回归都是在写功能的同时一起写的。
+`tests/run_tests.sh` 的 49 项回归都是在写功能的同时一起写的。
 其中**端侧 C 特征与训练脚本 Python 特征逐维一致性校验**这一条是 AI 提醒后
 补上的，实测最大误差 3.0e-05——没有这一条，电脑端的训练指标在板上是不可信的。
 

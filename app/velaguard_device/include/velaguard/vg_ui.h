@@ -26,6 +26,8 @@ typedef enum
   VG_PAGE_HISTORY,      /* 历史记录页 */
   VG_PAGE_TEST,         /* 麦克风、播放、录入 */
   VG_PAGE_TEST_MORE,    /* 网络测试 */
+  VG_PAGE_NETWORK,      /* Wi-Fi 配网 */
+  VG_PAGE_BINDING,      /* 小米手机演示绑定 */
   VG_PAGE_MAX
 } vg_page_t;
 

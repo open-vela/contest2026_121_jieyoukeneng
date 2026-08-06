@@ -102,6 +102,10 @@ void vg_config_defaults(vg_config_t *cfg);
 
 int vg_config_load(const char *path);
 
+/* 以临时文件 + fsync + rename 保存当前配置；生产配置需保持签名约束。 */
+
+int vg_config_save(const char *path);
+
 /* 对候选配置执行类型、范围和跨字段校验，不修改当前配置。 */
 
 int vg_config_validate(const vg_config_t *cfg, char *reason, size_t reason_len);
