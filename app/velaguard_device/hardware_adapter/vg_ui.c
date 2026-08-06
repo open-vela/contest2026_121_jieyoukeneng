@@ -12,6 +12,7 @@
 #include "velaguard/vg_config.h"
 #include "velaguard/vg_daemon.h"
 #include "velaguard/vg_detector.h"
+#include "velaguard/vg_diagnostics.h"
 #include "velaguard/vg_enroll.h"
 #include "velaguard/vg_event_log.h"
 #include "velaguard/vg_event_sm.h"
@@ -27,7 +28,7 @@
 
 static vg_page_t         g_page = VG_PAGE_HOME;
 static int               g_history_top;
-static vg_wizard_state_t g_wizard = VG_WIZ_IDLE;
+static volatile vg_wizard_state_t g_wizard = VG_WIZ_IDLE;
 static int               g_wiz_kind;
 static int               g_wiz_phrase;
 static int               g_wiz_person;
@@ -35,7 +36,6 @@ static int               g_wiz_style;
 static bool              g_wiz_restart_daemon;
 static volatile bool     g_wiz_capture_running;
 static volatile bool     g_wiz_cancel_requested;
-static pthread_mutex_t   g_wiz_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ASCII 备用名：串口调试和无中文字体的构建仍可使用。 */
 
@@ -259,17 +259,17 @@ static int vg_render_test(char *buf, size_t len, bool ascii)
 
   vg_format_time(vg_wall_sec(), ts, sizeof(ts));
   VG_APPEND("%s\n", ascii ? "== TEST ==" : "== 测试与录入 ==");
-  VG_APPEND("%s: %s\n", ascii ? "Date" : "日期",
-            vg_time_reliable() ? ts : "时间未同步");
-  VG_APPEND("%s: %s\n", ascii ? "Microphone" : "麦克风",
-            ascii ? "button 1: capture test" : "按钮1：采集测试");
-  VG_APPEND("%s: %s\n", ascii ? "Playback" : "播放提示音",
+  VG_APPEND("%s: %s\n", ascii ? "Time" : "时间",
+            vg_time_reliable() ? ts : "未同步");
+  VG_APPEND("%s: %s\n", ascii ? "Mic" : "麦克风",
+            ascii ? "KEY1" : "按钮1");
+  VG_APPEND("%s: %s\n", ascii ? "Play" : "播放",
             vg_indicator_has_audio_out() ? (ascii ? "READY" : "已发现")
                                          : (ascii ? "MISSING" : "未发现"));
-  VG_APPEND("%s\n", ascii ? "button 2: playback; button 3: enrollment"
-                            : "按钮2：播放测试；按钮3：录入家庭称呼");
-  VG_APPEND("%s\n", ascii ? "button 4: network; button 5: return"
-                            : "按钮4：网络测试；按钮5：返回主界面");
+  VG_APPEND("%s\n", ascii ? "KEY2 Play  KEY3 Enroll"
+                            : "按钮2播放  按钮3录入");
+  VG_APPEND("%s\n", ascii ? "KEY4 Network  KEY5 Back"
+                            : "按钮4网络  按钮5返回");
   if (vg_ui_wizard_active())
     {
       vg_tpl_kind_t kind = (vg_tpl_kind_t)g_wiz_kind;
@@ -278,24 +278,24 @@ static int vg_render_test(char *buf, size_t len, bool ascii)
       switch (g_wizard)
         {
           case VG_WIZ_PICK_KIND:
-            VG_APPEND("%s: %s\n", ascii ? "1/4 kind" : "1/4 类别",
+            VG_APPEND("%s: %s\n", ascii ? "1 kind" : "1 类别",
                       g_wiz_kind == VG_TPL_NAME ? "姓名/称呼" :
                       g_wiz_kind == VG_TPL_HELP ? "求救短语" : "方言短语");
             break;
           case VG_WIZ_PICK_PHRASE:
-            VG_APPEND("%s: %s\n", ascii ? "2/4 phrase" : "2/4 短语",
+            VG_APPEND("%s: %s\n", ascii ? "2 phrase" : "2 短语",
                       vg_enroll_preset_phrase(kind, g_wiz_phrase));
             break;
           case VG_WIZ_PICK_PERSON:
-            VG_APPEND("%s: %s\n", ascii ? "3/4 person" : "3/4 成员",
+            VG_APPEND("%s: %s\n", ascii ? "3 person" : "3 成员",
                       vg_enroll_preset_person(g_wiz_person));
             break;
           case VG_WIZ_PICK_STYLE:
-            VG_APPEND("%s: %s\n", ascii ? "4/4 style" : "4/4 语气",
+            VG_APPEND("%s: %s\n", ascii ? "4 style" : "4 语气",
                       g_wiz_style == VG_TPL_URGENT ? "急促" : "平静");
             break;
           case VG_WIZ_RECORDING:
-            VG_APPEND("%s %d/%d%s\n", ascii ? "Say the phrase" : "请说出短语",
+            VG_APPEND("%s %d/%d%s\n", ascii ? "Say" : "请说",
                       vg_enroll_takes(), VG_ENROLL_MIN_TAKES,
                       g_wiz_capture_running ? "（采集中）" : "");
             break;
@@ -308,6 +308,10 @@ static int vg_render_test(char *buf, size_t len, bool ascii)
     }
   VG_APPEND("%s\n", ascii ? "Raw audio is temporary and never saved."
                             : "原始声音只临时读取，不保存录音文件。");
+  if (vg_diagnostics_running())
+    {
+      VG_APPEND("%s\n", ascii ? "Test is running..." : "测试正在进行，请稍候。");
+    }
   return (int)pos;
 }
 
@@ -476,18 +480,17 @@ static void *vg_wizard_capture_worker(void *arg)
       goto done;
     }
 
-  pthread_mutex_lock(&g_wiz_lock);
   if (!g_wiz_cancel_requested && g_wizard == VG_WIZ_RECORDING &&
       vg_enroll_feed(feat) < 0)
     {
       printf("[velaguard] 录入失败：模板采样已达到上限\n");
     }
-  pthread_mutex_unlock(&g_wiz_lock);
 
 done:
   g_wiz_capture_running = false;
   if (g_wiz_cancel_requested)
     {
+      vg_enroll_cancel();
       vg_wizard_audio_restore();
       vg_indicator_set_led(VG_LED_GUARD);
       g_wiz_cancel_requested = false;
@@ -696,10 +699,7 @@ void vg_ui_wizard_cancel(void)
   if (g_wiz_capture_running)
     {
       g_wiz_cancel_requested = true;
-      pthread_mutex_lock(&g_wiz_lock);
-      vg_enroll_cancel();
       g_wizard = VG_WIZ_IDLE;
-      pthread_mutex_unlock(&g_wiz_lock);
       printf("[velaguard] 已取消录入，当前采样结束后恢复守护\n");
       return;
     }

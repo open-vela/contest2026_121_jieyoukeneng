@@ -48,6 +48,7 @@ static lv_obj_t         *g_buttons[5];
 static lv_obj_t         *g_button_labels[5];
 static vg_action_t       g_button_actions[5];
 static lv_nuttx_result_t g_result;
+static unsigned int      g_feedback_ticks;
 
 extern const lv_font_t lv_font_simsun_16_cjk;
 
@@ -83,6 +84,7 @@ static void vg_lvgl_button_event(lv_event_t *event)
 
   if (index < 5)
     {
+      g_feedback_ticks = 3;
       if (vg_ui_page() == VG_PAGE_HOME && index == 0)
         {
           vg_ui_set_page(VG_PAGE_EVENT);
@@ -218,14 +220,22 @@ static void vg_lvgl_refresh(lv_timer_t *timer)
       lv_label_set_text(g_label, text);
     }
 
-  vg_format_time(vg_wall_sec(), time_text, sizeof(time_text));
-  if (vg_time_reliable())
+  if (g_feedback_ticks > 0)
     {
-      snprintf(clock_text, sizeof(clock_text), "现在 %s", time_text + 5);
+      snprintf(clock_text, sizeof(clock_text), "已执行");
+      g_feedback_ticks--;
     }
   else
     {
-      snprintf(clock_text, sizeof(clock_text), "时间未同步");
+      vg_format_time(vg_wall_sec(), time_text, sizeof(time_text));
+      if (vg_time_reliable())
+        {
+          snprintf(clock_text, sizeof(clock_text), "现在 %s", time_text + 5);
+        }
+      else
+        {
+          snprintf(clock_text, sizeof(clock_text), "时间未同步");
+        }
     }
   lv_label_set_text(g_clock, clock_text);
 
@@ -302,8 +312,9 @@ static void *vg_lvgl_thread(void *arg)
       lv_obj_set_style_text_font(g_button_labels[i], &lv_font_simsun_16_cjk, 0);
       lv_obj_center(g_button_labels[i]);
       g_button_actions[i] = VG_ACT_NONE;
+      /* 按下即执行，避免部分触摸驱动没有稳定上报 release/click 事件。 */
       lv_obj_add_event_cb(g_buttons[i], vg_lvgl_button_event,
-                          LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+                          LV_EVENT_PRESSED, (void *)(uintptr_t)i);
     }
 
   vg_lvgl_refresh_buttons();
