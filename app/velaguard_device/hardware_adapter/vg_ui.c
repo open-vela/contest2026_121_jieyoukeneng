@@ -269,9 +269,7 @@ static int vg_render_test(char *buf, size_t len, bool ascii)
             vg_indicator_has_audio_out() ? (ascii ? "READY" : "已发现")
                                          : (ascii ? "MISSING" : "未发现"));
   VG_APPEND("%s\n", ascii ? "KEY2 Play  KEY3 Enroll"
-                            : "按钮2播放  按钮3录入");
-  VG_APPEND("%s\n", ascii ? "KEY4 Network  KEY5 Back"
-                            : "按钮4网络  按钮5返回");
+                            : "2播放  3录入  4网络  5返回");
   if (vg_ui_wizard_active())
     {
       vg_tpl_kind_t kind = (vg_tpl_kind_t)g_wiz_kind;
@@ -308,11 +306,17 @@ static int vg_render_test(char *buf, size_t len, bool ascii)
             break;
         }
     }
-  VG_APPEND("%s\n", ascii ? "Raw audio is temporary and never saved."
-                            : "原始声音只临时读取，不保存录音文件。");
-  if (vg_diagnostics_running())
+  if (vg_diagnostics_state() == VG_DIAG_RUNNING)
     {
       VG_APPEND("%s\n", ascii ? "Test is running..." : "测试正在进行，请稍候。");
+    }
+  else if (vg_diagnostics_state() == VG_DIAG_PASSED)
+    {
+      VG_APPEND("%s\n", ascii ? "Test passed" : "测试通过");
+    }
+  else if (vg_diagnostics_state() == VG_DIAG_FAILED)
+    {
+      VG_APPEND("%s\n", ascii ? "Test failed" : "测试失败，请查看设备状态");
     }
   return (int)pos;
 }

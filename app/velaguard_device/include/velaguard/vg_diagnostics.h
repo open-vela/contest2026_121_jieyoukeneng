@@ -15,8 +15,17 @@ typedef enum
   VG_DIAG_ALL
 } vg_diag_kind_t;
 
+typedef enum
+{
+  VG_DIAG_IDLE = 0,
+  VG_DIAG_RUNNING,
+  VG_DIAG_PASSED,
+  VG_DIAG_FAILED
+} vg_diag_state_t;
+
 int vg_diagnostics_run(vg_diag_kind_t kind);
 int vg_diagnostics_start(vg_diag_kind_t kind);
 bool vg_diagnostics_running(void);
+vg_diag_state_t vg_diagnostics_state(void);
 
 #endif
