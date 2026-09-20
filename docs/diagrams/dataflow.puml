@@ -1,0 +1,62 @@
+@startuml 整体数据流
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+
+title 安聆 VelaGuard 整体数据流
+
+package "端侧（完全离线可用）" {
+    [板载麦克风 / wav] as MIC
+
+    component "vg_capture\n音频源抽象（MIC / WAV / 无源）" as CAPTURE {
+        note right: 16kHz 单声道\n1 秒窗口，50% 重叠
+    }
+
+    component "vg_feature\n预加重→Hamming→FFT→Mel→MFCC→40 维" as FEATURE
+
+    component "vg_classifier\n环境声景 int8 MLP" as CLS_ENV
+    component "vg_classifier\n人声异常 int8 MLP" as CLS_VOICE
+    component "vg_enroll\n个性化模板匹配" as ENROLL
+
+    database "SoundObservation /\nDistressObservation" as OBS
+
+    component "vg_event_sm\n三级风险状态机 + 五类规则\n+ 并发仲裁 + snooze\n+ 夜间/时钟降级" as SM
+
+    component "vg_event_log\n100 条环形日志" as LOG
+    component "vg_ui\nLCD 三页面" as UI
+    component "vg_indicator\n提示音 + LED" as INDICATOR
+    component "vg_input\n按键/串口" as INPUT
+
+    component "vg_notifier" as NOTIFIER
+    component "vg_agent\nSkill 文案" as AGENT
+    component "vg_uploader\n幂等队列 + 断网补发" as UPLOADER
+}
+
+node "prototype/console\nNode 零依赖控制台 + SQLite" as CONSOLE
+
+actor "家属手机浏览器\n（局域网，零 App、\n零账号、零公网）" as BROWSER
+
+MIC --> CAPTURE
+CAPTURE --> FEATURE
+FEATURE --> CLS_ENV
+FEATURE --> CLS_VOICE
+FEATURE --> ENROLL
+
+CLS_ENV --> OBS
+CLS_VOICE --> OBS
+ENROLL --> OBS
+
+OBS --> SM
+SM --> LOG : 事件记录
+SM --> UI : 界面更新
+SM --> INDICATOR : 提示音/LED
+INPUT --> SM : 用户交互
+
+SM --> NOTIFIER : 仅"无人确认→紧急"
+NOTIFIER --> AGENT : Skill 文案生成
+NOTIFIER --> UPLOADER
+
+UPLOADER --> CONSOLE : HTTP POST 结构化摘要\n（无音频、无对话文本）
+CONSOLE --> BROWSER : SSE 实时推送
+
+@enduml

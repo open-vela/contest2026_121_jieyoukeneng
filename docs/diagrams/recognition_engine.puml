@@ -1,0 +1,73 @@
+@startuml 识别引擎
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title 识别引擎（PRD-01 / 07）- 处理流程
+
+start
+
+:16kHz 单声道 1s 窗口
+（50% 重叠）;
+
+:预加重 0.97;
+
+:Hamming 窗
+25ms 帧移 / 10ms 帧长;
+
+:512 点 FFT;
+
+:26 路 Mel 滤波器组
+（20~7800Hz）;
+
+:取对数 log;
+
+:DCT 变换
+→ 13 维 MFCC;
+
+:提取 40 维特征向量
+均值(13) + 标准差(13)
++ 一阶差分均值(13)
++ 过零率(1);
+
+if (能量 < -55 dBFS\n静音窗口？) then (是)
+    :跳过推理
+    省电 + 抑制底噪误报;
+    stop
+else (否)
+endif
+
+fork
+    :**环境声景分类**
+    4 分类 MLP
+    other / alarm_beep
+    water_flow / impact;
+fork again
+    :**人声异常检测**
+    4 分类 MLP
+    none / moan
+    scream / shout_help;
+fork again
+    :**个性化模板匹配**
+    归一化欧氏距离
+    → matchedPhrase
+    → personLabel
+    → urgency;
+end fork
+
+:合并三条通道结果;
+
+:输出 SoundObservation
+或 DistressObservation;
+
+stop
+
+note right
+  **为什么是 MLP 不是 DS-CNN**
+  PRD-07 降级决断表：板端量化推理
+  2 个工作日内跑不通 → 降级 MFCC
+  + 小型分类器，权重导出 C 数组
+  接口保持不变，后续换 DS-CNN
+  只需替换 vg_classifier.c
+end note
+
+@enduml

@@ -3,12 +3,15 @@
  ****************************************************************************/
 
 #include <fcntl.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #ifdef __NuttX__
+#  include <pthread.h>
 #  include <nuttx/audio/audio.h>
 #  include "system/nxplayer.h"
 #endif
@@ -40,6 +43,10 @@ static bool          g_full_duplex = false;   /* 实机标定前保守假设不�
 static uint64_t      g_last_blink_ms;
 static bool          g_blink_on;
 static char          g_led_text[48] = "LED 关闭";
+#ifdef __NuttX__
+static pthread_mutex_t g_playback_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool             g_playback_active;
+#endif
 
 /****************************************************************************
  * Private Functions
@@ -74,6 +81,29 @@ static const char *vg_mode_name(vg_led_mode_t mode)
       default:               return "LED 关闭";
     }
 }
+
+#ifdef __NuttX__
+struct vg_playback_job
+{
+  struct nxplayer_s *player;
+};
+
+static void *vg_indicator_playback_worker(void *arg)
+{
+  struct vg_playback_job *job = arg;
+
+  /* nxplayer_release 会等待播放线程完成；放在后台线程中，不能阻塞
+   * 诊断线程、告警线程或 LVGL 线程。 */
+  nxplayer_release(job->player);
+  free(job);
+
+  pthread_mutex_lock(&g_playback_lock);
+  g_playback_active = false;
+  pthread_mutex_unlock(&g_playback_lock);
+  vg_capture_release_playback();
+  return NULL;
+}
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -174,7 +204,20 @@ int vg_indicator_play(vg_level_t level)
     {
 #ifdef __NuttX__
       struct nxplayer_s *player;
+      struct vg_playback_job *job;
+      pthread_t thread;
       int ret;
+
+      pthread_mutex_lock(&g_playback_lock);
+      if (g_playback_active)
+        {
+          pthread_mutex_unlock(&g_playback_lock);
+          vg_capture_release_playback();
+          printf("[velaguard] 上一段提示音仍在播放，请稍候\n");
+          return -EBUSY;
+        }
+      g_playback_active = true;
+      pthread_mutex_unlock(&g_playback_lock);
 
       /* 使用 openvela 已启用的 NxPlayer 生成纯音，不依赖 /data 中的音频
        * 文件，也不会把原始录音落盘。提示音按整秒播放，采集让路仍按
@@ -185,6 +228,9 @@ int vg_indicator_play(vg_level_t level)
       if (player == NULL)
         {
           printf("[velaguard] 创建提示音播放器失败，降级为控制台提示\n");
+          pthread_mutex_lock(&g_playback_lock);
+          g_playback_active = false;
+          pthread_mutex_unlock(&g_playback_lock);
           vg_capture_release_playback();
           return -1;
         }
@@ -195,20 +241,45 @@ int vg_indicator_play(vg_level_t level)
           ret = nxplayer_playtone(player, 16000, pitch_hz, duration_sec);
         }
 
-      /* NxPlayer 的播放线程会持有自己的引用，释放调用方引用即可。 */
-
-      nxplayer_release(player);
       if (ret < 0)
         {
+          nxplayer_release(player);
+          pthread_mutex_lock(&g_playback_lock);
+          g_playback_active = false;
+          pthread_mutex_unlock(&g_playback_lock);
           printf("[velaguard] 提示音播放失败(%d)，继续本地告警\n", ret);
+          vg_capture_release_playback();
+          return ret;
         }
-      else
+
+      job = malloc(sizeof(*job));
+      if (job == NULL)
         {
-          printf("[velaguard] 已播放 %s 级提示音（%s）\n",
-                 vg_level_cn(level), g_full_duplex ? "录放并发" : "时分让路");
+          nxplayer_release(player);
+          pthread_mutex_lock(&g_playback_lock);
+          g_playback_active = false;
+          pthread_mutex_unlock(&g_playback_lock);
+          vg_capture_release_playback();
+          return -ENOMEM;
         }
-      vg_capture_release_playback();
-      return ret < 0 ? ret : 0;
+
+      job->player = player;
+      ret = pthread_create(&thread, NULL, vg_indicator_playback_worker, job);
+      if (ret != 0)
+        {
+          free(job);
+          nxplayer_release(player);
+          pthread_mutex_lock(&g_playback_lock);
+          g_playback_active = false;
+          pthread_mutex_unlock(&g_playback_lock);
+          vg_capture_release_playback();
+          return -ret;
+        }
+
+      pthread_detach(thread);
+      printf("[velaguard] 已开始播放 %s 级提示音（%s）\n",
+             vg_level_cn(level), g_full_duplex ? "录放并发" : "时分让路");
+      return 0;
 #else
       (void)duration_sec;
       (void)pitch_hz;
@@ -311,6 +382,20 @@ bool vg_indicator_has_led(void)
 bool vg_indicator_has_audio_out(void)
 {
   return g_has_audio_out;
+}
+
+bool vg_indicator_audio_busy(void)
+{
+#ifdef __NuttX__
+  bool busy;
+
+  pthread_mutex_lock(&g_playback_lock);
+  busy = g_playback_active;
+  pthread_mutex_unlock(&g_playback_lock);
+  return busy;
+#else
+  return false;
+#endif
 }
 
 void vg_indicator_set_full_duplex(bool supported)
