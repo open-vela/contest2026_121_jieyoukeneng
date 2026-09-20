@@ -571,6 +571,10 @@ static void *vg_wizard_prepare_worker(void *arg)
   if (ret < 0)
     {
       printf("[velaguard] 录入前守护停止失败，请先确认音频通路空闲\n");
+      g_wizard = VG_WIZ_IDLE;
+      g_wiz_cancel_requested = false;
+      vg_wizard_audio_restore_async();
+      vg_indicator_set_led(VG_LED_GUARD);
     }
   return NULL;
 }
@@ -743,6 +747,12 @@ static void vg_wizard_audio_restore(void)
 
 void vg_ui_wizard_start(void)
 {
+  if (vg_diagnostics_running())
+    {
+      printf("[velaguard] 设备测试仍在播放或收音，请稍候再进入录入\n");
+      return;
+    }
+
   if (g_wiz_prepare_running || g_wiz_restore_running ||
       g_wiz_capture_running)
     {
@@ -880,6 +890,12 @@ void vg_ui_wizard_prev(void)
 
 void vg_ui_wizard_confirm(void)
 {
+  if (g_wiz_prepare_running || g_wiz_restore_running)
+    {
+      printf("[velaguard] 音频通路正在准备，请稍候再操作\n");
+      return;
+    }
+
   switch (g_wizard)
     {
       case VG_WIZ_PICK_KIND:

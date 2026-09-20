@@ -3,6 +3,7 @@
  ****************************************************************************/
 
 #include <stdint.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -117,6 +118,16 @@ static int vg_diag_network(void)
   return online ? 0 : -1;
 }
 
+static void vg_diag_wait_playback(void)
+{
+  int waits = 0;
+
+  while (vg_indicator_audio_busy() && waits++ < 30)
+    {
+      usleep(100 * 1000);
+    }
+}
+
 int vg_diagnostics_run(vg_diag_kind_t kind)
 {
   int failed = 0;
@@ -140,6 +151,7 @@ int vg_diagnostics_run(vg_diag_kind_t kind)
             }
           else
             {
+              vg_diag_wait_playback();
               printf("扬声器自检通过：播放请求成功，请确认听到提示音\n");
             }
         }

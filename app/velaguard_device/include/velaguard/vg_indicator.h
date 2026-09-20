@@ -60,6 +60,7 @@ const char *vg_indicator_led_text(void);
 
 bool vg_indicator_has_led(void);
 bool vg_indicator_has_audio_out(void);
+bool vg_indicator_audio_busy(void);
 
 /* 录放并发能力标定结果（实机基线第一周验证，PRD-01/04） */
 

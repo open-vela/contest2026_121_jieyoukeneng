@@ -25,6 +25,7 @@
 #include <lvgl/lvgl.h>
 
 #include "velaguard/vg_event_sm.h"
+#include "velaguard/vg_diagnostics.h"
 #include "velaguard/vg_enroll.h"
 #include "velaguard/vg_input.h"
 #include "velaguard/vg_time.h"
@@ -60,7 +61,7 @@ static unsigned int      g_feedback_ticks;
 static char              g_wifi_synced_ssid[VG_WIFI_SSID_LEN];
 static bool               g_wifi_ssid_dirty;
 
-extern const lv_font_t lv_font_simsun_16_cjk;
+extern const lv_font_t lv_font_velaguard_extra_16;
 
 /****************************************************************************
  * Private Functions
@@ -315,11 +316,35 @@ static void vg_lvgl_set_button(unsigned int index, const char *text,
   lv_label_set_text(g_button_labels[index], text);
 }
 
+static void vg_lvgl_set_button_enabled(unsigned int index, bool enabled)
+{
+  if (index >= 5)
+    {
+      return;
+    }
+
+  if (enabled)
+    {
+      lv_obj_clear_state(g_buttons[index], LV_STATE_DISABLED);
+    }
+  else
+    {
+      lv_obj_add_state(g_buttons[index], LV_STATE_DISABLED);
+    }
+}
+
 static void vg_lvgl_refresh_buttons(void)
 {
+  vg_wifi_status_t wifi_status;
+  bool wifi_busy = false;
+  bool diagnostic_busy = false;
+
+  diagnostic_busy = vg_diagnostics_state() == VG_DIAG_RUNNING;
+
   for (unsigned int i = 0; i < 5; i++)
     {
       lv_obj_clear_flag(g_buttons[i], LV_OBJ_FLAG_HIDDEN);
+      vg_lvgl_set_button_enabled(i, true);
     }
 
   if (vg_ui_wizard_active())
@@ -364,6 +389,12 @@ static void vg_lvgl_refresh_buttons(void)
         vg_lvgl_set_button(2, "录入", VG_ACT_ENTER);
         vg_lvgl_set_button(3, "更多", VG_ACT_NONE);
         vg_lvgl_set_button(4, "返回", VG_ACT_BACK);
+        if (diagnostic_busy)
+          {
+            vg_lvgl_set_button_enabled(0, false);
+            vg_lvgl_set_button_enabled(1, false);
+            vg_lvgl_set_button_enabled(2, false);
+          }
         break;
 
       case VG_PAGE_TEST_MORE:
@@ -380,6 +411,20 @@ static void vg_lvgl_refresh_buttons(void)
         vg_lvgl_set_button(2, "连接", VG_ACT_NONE);
         vg_lvgl_set_button(3, "绑定", VG_ACT_BINDING);
         vg_lvgl_set_button(4, "返回", VG_ACT_BACK);
+        if (vg_wifi_get_status(&wifi_status) == 0)
+          {
+            wifi_busy = wifi_status.operation_busy ||
+                        wifi_status.state == VG_WIFI_SCANNING ||
+                        wifi_status.state == VG_WIFI_CONNECTING;
+          }
+        if (wifi_busy)
+          {
+            /* 网络任务未真正退出前，禁止再次创建扫描/连接任务；返回和
+             * 绑定仍保持可用，用户不会被锁在配网页面。 */
+            vg_lvgl_set_button_enabled(0, false);
+            vg_lvgl_set_button_enabled(1, false);
+            vg_lvgl_set_button_enabled(2, false);
+          }
         break;
 
       case VG_PAGE_BINDING:
@@ -495,7 +540,7 @@ static void *vg_lvgl_thread(void *arg)
   lv_obj_set_height(g_label, 158);
   lv_obj_align(g_label, LV_ALIGN_TOP_LEFT, 6, 28);
   lv_label_set_long_mode(g_label, LV_LABEL_LONG_WRAP);
-  lv_obj_set_style_text_font(g_label, &lv_font_simsun_16_cjk, 0);
+  lv_obj_set_style_text_font(g_label, &lv_font_velaguard_extra_16, 0);
   lv_obj_set_style_text_color(g_label, lv_color_hex(0xe8eaf0), 0);
   lv_label_set_text(g_label, "安聆守护正在启动...");
 
@@ -503,7 +548,7 @@ static void *vg_lvgl_thread(void *arg)
   lv_obj_set_width(g_clock, LV_PCT(96));
   lv_obj_align(g_clock, LV_ALIGN_TOP_RIGHT, -6, 9);
   lv_obj_set_style_text_align(g_clock, LV_TEXT_ALIGN_RIGHT, 0);
-  lv_obj_set_style_text_font(g_clock, &lv_font_simsun_16_cjk, 0);
+  lv_obj_set_style_text_font(g_clock, &lv_font_velaguard_extra_16, 0);
   lv_obj_set_style_text_color(g_clock, lv_color_hex(0x9fb6c9), 0);
   lv_label_set_text(g_clock, "时间未同步");
 
@@ -513,7 +558,7 @@ static void *vg_lvgl_thread(void *arg)
   lv_textarea_set_one_line(g_wifi_ssid, true);
   lv_textarea_set_max_length(g_wifi_ssid, VG_WIFI_SSID_LEN - 1);
   lv_textarea_set_placeholder_text(g_wifi_ssid, "Wi-Fi 名称");
-  lv_obj_set_style_text_font(g_wifi_ssid, &lv_font_simsun_16_cjk, 0);
+  lv_obj_set_style_text_font(g_wifi_ssid, &lv_font_velaguard_extra_16, 0);
   lv_obj_add_event_cb(g_wifi_ssid, vg_lvgl_wifi_textarea_event,
                       LV_EVENT_FOCUSED, NULL);
   lv_obj_add_event_cb(g_wifi_ssid, vg_lvgl_wifi_textarea_event,
@@ -527,13 +572,17 @@ static void *vg_lvgl_thread(void *arg)
   lv_textarea_set_password_mode(g_wifi_password, true);
   lv_textarea_set_placeholder_text(g_wifi_password,
                                    "Wi-Fi 密码（开放网络留空）");
-  lv_obj_set_style_text_font(g_wifi_password, &lv_font_simsun_16_cjk, 0);
+  lv_obj_set_style_text_font(g_wifi_password, &lv_font_velaguard_extra_16, 0);
   lv_obj_add_event_cb(g_wifi_password, vg_lvgl_wifi_textarea_event,
                       LV_EVENT_FOCUSED, NULL);
 
   g_wifi_keyboard = lv_keyboard_create(lv_screen_active());
   lv_obj_set_size(g_wifi_keyboard, 240, 96);
   lv_obj_set_pos(g_wifi_keyboard, 0, 96);
+  lv_obj_set_style_text_font(g_wifi_keyboard, &lv_font_velaguard_extra_16,
+                             LV_PART_MAIN);
+  lv_obj_set_style_text_font(g_wifi_keyboard, &lv_font_velaguard_extra_16,
+                             LV_PART_ITEMS);
   lv_keyboard_set_mode(g_wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(g_wifi_keyboard, vg_lvgl_wifi_keyboard_event,
                       LV_EVENT_READY, NULL);
@@ -555,7 +604,8 @@ static void *vg_lvgl_thread(void *arg)
       lv_obj_set_style_bg_color(g_buttons[i], lv_color_hex(0x3978a8),
                                 LV_STATE_PRESSED);
       g_button_labels[i] = lv_label_create(g_buttons[i]);
-      lv_obj_set_style_text_font(g_button_labels[i], &lv_font_simsun_16_cjk, 0);
+      lv_obj_set_style_text_font(g_button_labels[i],
+                                 &lv_font_velaguard_extra_16, 0);
       lv_obj_center(g_button_labels[i]);
       g_button_actions[i] = VG_ACT_NONE;
       /* 按下即执行，避免部分触摸驱动没有稳定上报 release/click 事件。 */

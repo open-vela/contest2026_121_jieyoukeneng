@@ -43,6 +43,7 @@ typedef struct
   vg_wifi_state_t state;
   unsigned int    network_count;
   unsigned int    selected;
+  bool            operation_busy;
   bool            ip_ready;
   char            ssid[VG_WIFI_SSID_LEN];
   char            ip[VG_WIFI_IP_LEN];

@@ -87,6 +87,19 @@ static void vg_wifi_set_error(const char *message)
 }
 
 #ifdef CONFIG_WIRELESS_WAPI
+static void vg_wifi_set_notice(const char *message)
+{
+  pthread_mutex_lock(&g_wifi_lock);
+  if (message != NULL)
+    {
+      snprintf(g_wifi_status.error, sizeof(g_wifi_status.error), "%s",
+               message);
+    }
+  pthread_mutex_unlock(&g_wifi_lock);
+}
+#endif
+
+#ifdef CONFIG_WIRELESS_WAPI
 static void vg_wifi_worker_done(void)
 {
   pthread_mutex_lock(&g_wifi_lock);
@@ -100,6 +113,7 @@ static void vg_wifi_worker_exit(void)
   pthread_mutex_lock(&g_wifi_lock);
   g_wifi_stopping = false;
   g_wifi_worker_exited = true;
+  g_wifi_status.operation_busy = false;
   if (!g_wifi_ready)
     {
       g_wifi_status.state = VG_WIFI_IDLE;
@@ -179,9 +193,12 @@ static void vg_wifi_set_ip_status(int sock, bool *ip_ready)
   struct in_addr addr;
   const char *text;
 
+  /* WAPI 的地址缓存可能滞后于网卡实际状态；DHCP 完成后直接读取
+   * netlib 的接口地址，避免旧地址把连接误判为可用。 */
+  (void)sock;
   *ip_ready = false;
   memset(&addr, 0, sizeof(addr));
-  if (wapi_get_ip(sock, VG_WIFI_IFNAME, &addr) < 0 || addr.s_addr == 0)
+  if (netlib_get_ipv4addr(VG_WIFI_IFNAME, &addr) < 0 || addr.s_addr == 0)
     {
       return;
     }
@@ -366,19 +383,23 @@ static int vg_wifi_save_config(int sock, const char *ssid,
   (void)password;
   return -ENOTSUP;
 #else
-  struct ether_addr ap;
   struct wpa_wconfig_s config;
   char bssid[18];
+  struct ether_addr ap;
 
-  if (wapi_get_ap(sock, VG_WIFI_IFNAME, &ap) < 0)
+  if (wapi_get_ap(sock, VG_WIFI_IFNAME, &ap) == 0)
     {
-      return -EIO;
+      snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x",
+               ap.ether_addr_octet[0], ap.ether_addr_octet[1],
+               ap.ether_addr_octet[2], ap.ether_addr_octet[3],
+               ap.ether_addr_octet[4], ap.ether_addr_octet[5]);
     }
-
-  snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x",
-           ap.ether_addr_octet[0], ap.ether_addr_octet[1],
-           ap.ether_addr_octet[2], ap.ether_addr_octet[3],
-           ap.ether_addr_octet[4], ap.ether_addr_octet[5]);
+  else
+    {
+      /* WAPI 配置加载要求 bssid 字段存在且可解析；全零地址表示不锁定
+       * AP，后续仍由 ESSID 选择实际热点。 */
+      snprintf(bssid, sizeof(bssid), "00:00:00:00:00:00");
+    }
 
   memset(&config, 0, sizeof(config));
   config.sta_mode = WAPI_MODE_MANAGED;
@@ -444,6 +465,7 @@ static void *vg_wifi_connect_worker(void *arg)
   bool associated = false;
   bool cancelled = false;
   bool dhcp_reset_failed = false;
+  bool save_failed = false;
   int dhcp_attempts = 0;
   int last_dhcp_try = -5;
   enum wapi_essid_flag_e flag = WAPI_ESSID_OFF;
@@ -469,6 +491,7 @@ static void *vg_wifi_connect_worker(void *arg)
       return NULL;
     }
 
+  wpa_driver_wext_disconnect(sock, VG_WIFI_IFNAME);
   ret = wapi_set_ifup(sock, VG_WIFI_IFNAME);
   if (ret == 0)
     {
@@ -477,6 +500,11 @@ static void *vg_wifi_connect_worker(void *arg)
   if (ret == 0)
     {
       ret = vg_wifi_configure_security(sock, password);
+    }
+  if (ret == 0)
+    {
+      /* 与开发板 start_wifi.sh 一致：关闭省电，避免关联后 DHCP 被拖慢。 */
+      (void)wapi_set_power_save(sock, VG_WIFI_IFNAME, false);
     }
   if (ret == 0)
     {
@@ -491,7 +519,7 @@ static void *vg_wifi_connect_worker(void *arg)
       return NULL;
     }
 
-  for (tries = 0; tries < 20; tries++)
+  for (tries = 0; tries < 40; tries++)
     {
       if (vg_wifi_worker_should_stop())
         {
@@ -505,7 +533,7 @@ static void *vg_wifi_connect_worker(void *arg)
           flag == WAPI_ESSID_ON && strcmp(current, ssid) == 0)
         {
           associated = true;
-          if (!ip_ready && dhcp_attempts < 2 &&
+          if (!ip_ready && dhcp_attempts < 3 &&
               tries - last_dhcp_try >= 5)
             {
               /* 只有确认已经关联后再请求 DHCP，避免过早请求导致
@@ -550,7 +578,6 @@ static void *vg_wifi_connect_worker(void *arg)
     }
 
   {
-    bool save_failed = false;
     bool save_requested = false;
 
     pthread_mutex_lock(&g_wifi_lock);
@@ -640,8 +667,14 @@ static int vg_wifi_start_worker_locked(vg_wifi_worker_kind_t kind)
   bool attr_initialized = false;
   int ret;
 
+  if (g_wifi_stopping || g_wifi_worker_running || !g_wifi_worker_exited)
+    {
+      return -EBUSY;
+    }
+
   g_wifi_worker_running = true;
   g_wifi_worker_exited = false;
+  g_wifi_status.operation_busy = true;
 #ifndef __NuttX__
   g_wifi_worker_valid = false;
   g_wifi_worker_reaping = false;
@@ -670,6 +703,7 @@ static int vg_wifi_start_worker_locked(vg_wifi_worker_kind_t kind)
     {
       g_wifi_worker_running = false;
       g_wifi_worker_exited = true;
+      g_wifi_status.operation_busy = false;
       if (attr_initialized)
         {
           pthread_attr_destroy(&attr);
@@ -788,7 +822,7 @@ int vg_wifi_start_scan(void)
     {
       ret = -ESHUTDOWN;
     }
-  else if (g_wifi_worker_running)
+  else if (g_wifi_worker_running || !g_wifi_worker_exited)
     {
       ret = -EBUSY;
     }
@@ -809,6 +843,10 @@ int vg_wifi_start_scan(void)
         {
           vg_wifi_set_error("Wi-Fi 模块未初始化");
         }
+      else if (ret == -EBUSY)
+        {
+          vg_wifi_set_notice("上一次 Wi-Fi 操作仍在结束，请稍候");
+        }
     }
   return ret;
 #else
@@ -823,8 +861,18 @@ int vg_wifi_select(int delta)
 
   pthread_mutex_lock(&g_wifi_lock);
   count = g_wifi_status.network_count;
+  if (g_wifi_worker_running || !g_wifi_worker_exited)
+    {
+      snprintf(g_wifi_status.error, sizeof(g_wifi_status.error), "%s",
+               "Wi-Fi 扫描尚未结束，请稍候");
+      pthread_mutex_unlock(&g_wifi_lock);
+      return -EBUSY;
+    }
+
   if (count == 0)
     {
+      snprintf(g_wifi_status.error, sizeof(g_wifi_status.error), "%s",
+               "请先扫描 Wi-Fi 热点");
       pthread_mutex_unlock(&g_wifi_lock);
       return -ENOENT;
     }
@@ -914,7 +962,7 @@ int vg_wifi_connect(const char *ssid, const char *password, bool save)
     {
       ret = -ESHUTDOWN;
     }
-  else if (g_wifi_worker_running)
+  else if (g_wifi_worker_running || !g_wifi_worker_exited)
     {
       ret = -EBUSY;
     }
@@ -932,6 +980,9 @@ int vg_wifi_connect(const char *ssid, const char *password, bool save)
       if (ret < 0)
         {
           memset(g_pending_password, 0, sizeof(g_pending_password));
+          g_wifi_status.state = VG_WIFI_FAILED;
+          g_wifi_status.ip_ready = false;
+          g_wifi_status.ip[0] = '\0';
         }
     }
   pthread_mutex_unlock(&g_wifi_lock);
@@ -943,6 +994,10 @@ int vg_wifi_connect(const char *ssid, const char *password, bool save)
   else if (ret == -ESHUTDOWN)
     {
       vg_wifi_set_error("Wi-Fi 模块未初始化");
+    }
+  else if (ret == -EBUSY)
+    {
+      vg_wifi_set_notice("上一次 Wi-Fi 操作仍在结束，请稍候");
     }
   return ret;
 #else

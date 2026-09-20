@@ -1,0 +1,48 @@
+@startuml 状态机
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title 状态机（PRD-03）- 状态与等级
+
+state "正常监测" as NORMAL
+state "可疑(SUSPECT)" as SUSPECT
+state "提醒(NOTICE)" as NOTICE
+state "警告(WARNING)" as WARNING
+state "紧急(EMERGENCY)" as EMERGENCY
+state "已关闭" as CLOSED
+state "挂起\n（最多2次）" as SNOOZE
+
+NORMAL --> SUSPECT : 观测命中
+
+SUSPECT --> NOTICE : 达到规则阈值\n只显示+轻提示
+SUSPECT --> WARNING : 达到规则阈值\n倒计时等待确认
+SUSPECT --> EMERGENCY : 达到规则阈值\n持续提醒+远程通知
+
+note right of NOTICE
+  只显示+轻提示
+end note
+
+note right of WARNING
+  倒计时等待确认
+end note
+
+note right of EMERGENCY
+  持续提醒 + 远程通知
+end note
+
+NOTICE --> CLOSED : 已处理
+WARNING --> CLOSED : 已处理
+WARNING --> SNOOZE : 稍后提醒
+WARNING --> EMERGENCY : 超时无人响应
+EMERGENCY --> CLOSED : 已处理/误报
+SNOOZE --> CLOSED : 已处理
+SNOOZE --> WARNING : 恢复监测
+
+EMERGENCY --> CLOSED : 无人响应\n升级后关闭
+
+note bottom of SNOOZE
+  挂起 10 分钟
+  最多 2 次
+end note
+
+@enduml
